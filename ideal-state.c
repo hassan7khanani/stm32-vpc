@@ -114,6 +114,7 @@ typedef struct{
     uint32_t systemtime_s;
 	  uint32_t systemtime_m;
 	  uint32_t systemtime_h;
+	  uint32_t ticks;
 
 } SystemTime;
 
@@ -127,7 +128,6 @@ typedef struct{
     uint32_t totalcycletime_s;
 	  uint32_t totalcycletime_m;
 	  uint32_t totalcycletime_h;
-
 } TotalCycleTime;
 
 TotalCycleTime total_cycle_time,cycle_time;
@@ -236,19 +236,7 @@ static void MX_USART1_UART_Init(void);
 /* USER CODE BEGIN 0 */
 
 
-SystemTime systemhours()
-{   
-	  char current_time_buff[200];
-	  //logic for overflow of these variables
-	  
-    system_time.systemtime_ms = HAL_GetTick();
-    system_time.systemtime_h = system_time.systemtime_ms / 3600000; // 1 hour = 3,600,000 milliseconds
-    system_time.systemtime_m = (system_time.systemtime_ms % 3600000) / 60000;
-    system_time.systemtime_s=(system_time.systemtime_ms % 60000) / 1000;
-	  //sprintf(current_time_buff,"Time is %02d:%02d:%02d:%02d \n\r ",time.current_time_h,time.current_time_m,time.current_time_s,time.current_time_ms);
-    HAL_UART_Transmit(&huart2, (uint8_t *)current_time_buff, sizeof(current_time_buff), 100);  
-	  return system_time;
-}
+
 
 
 
@@ -586,20 +574,7 @@ void write_to_flash(uint32_t address, uint8_t *data, uint32_t size,uint32_t Type
 }
 
 
-SystemTime  time_conversion()
 
-{   
-	
-	
-	
-	  //convert time into min,hour,seconds
-	  SystemTime time_converted;
- 	  time_converted.systemtime_ms = HAL_GetTick();
-    time_converted.systemtime_h = time_converted.systemtime_ms / 3600000; // 1 hour = 3,600,000 milliseconds
-    time_converted.systemtime_m = time_converted.systemtime_h / 60000;
-    time_converted.systemtime_s=  time_converted.systemtime_m / 1000;
-	  return time_converted;
-}
 
 //function to print temp fault array on uart
 void print_temp_fault_array(fault_array_t *temp_fault_array) {
@@ -714,17 +689,55 @@ for(i=1; i<128; i++)
 
 }
 
+SystemTime time_conversion()
+{   
+	  //SystemTime time_converted
+	  SystemTime time_converted;
+	  uint32_t ticks =HAL_GetTick() %1000;
+	
+	  //convert time into min,hour,seconds
+	  time_converted.ticks=ticks;
+ 	  time_converted.systemtime_ms = ticks %1000;
+    time_converted.systemtime_h = ticks / (1000 * 60 * 60); // 1 hour = 3,600,000 milliseconds
+    time_converted.systemtime_m = (ticks / (1000 * 60)) % 60;
+    time_converted.systemtime_s=  (ticks / 1000) % 60;
+	  return time_converted;
+}
+
+//function to read the system time from flash memory
+SystemTime read_systemtime_in_flashmemory()
+{
+    const uint32_t system_time_address = 0x08020000;
+	
+	  SystemTime read_system_time= *(SystemTime*)system_time_address; // Read SystemTime from flash memory
+	  char buffer[150];
+	 // Format and transmit system time
+	snprintf(buffer, sizeof(buffer), "System Time read: %02d:%02d:%02d:%03d:%03d\r\n",
+             read_system_time.systemtime_h, read_system_time.systemtime_m,
+             read_system_time.systemtime_s, read_system_time.systemtime_ms,read_system_time.ticks);
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
+
+    return read_system_time;
+	}
+
+
+//function to write the total system hours into flash memory
 void write_systemtime_in_flashmemory()
 {
     const uint32_t system_hours_address = 0x08020000;
 	  uint32_t size_of_system_structure = sizeof(system_time);
     uint8_t sytemtime_byte_array[size_of_system_structure];    
- 
+	
+	  //read system time from flash memory
+	  SystemTime system_time_fromflash=read_systemtime_in_flashmemory();
+	  //get the current system hours from time conversion function
+	  //system_time=time_conversion();
 	  //update the systemtime structure
-	  system_time.systemtime_ms = HAL_GetTick();
-    system_time.systemtime_h = system_time.systemtime_ms / 3600000; // 1 hour = 3,600,000 milliseconds
-    system_time.systemtime_m = (system_time.systemtime_ms % 3600000) / 60000;
-    system_time.systemtime_s=(system_time.systemtime_ms % 60000) / 1000;
+	  total_system_time.systemtime_ms = system_time.systemtime_ms + system_time_fromflash.systemtime_ms;
+    total_system_time.systemtime_h  = system_time.systemtime_h  + system_time_fromflash.systemtime_h;
+    total_system_time.systemtime_m  = system_time.systemtime_m  + system_time_fromflash.systemtime_m;
+    total_system_time.systemtime_s  = system_time.systemtime_s  + system_time_fromflash.systemtime_s;
+	  total_system_time.ticks         = system_time.ticks         + system_time_fromflash.ticks;
 	
 
     //convert systemtime structure into the byte array
@@ -739,17 +752,35 @@ void write_systemtime_in_flashmemory()
 	 //write_to_flash(fault_log_address, data, sizeof(my_faults),FLASH_TYPEPROGRAM_BYTE);
 	 
 	  char buffer[150];
-    snprintf(buffer, sizeof(buffer), "System Time written: %02d:%02d:%02d:%03d\r\n",
-             system_time.systemtime_h, system_time.systemtime_m,
-             system_time.systemtime_s, system_time.systemtime_ms);
+    snprintf(buffer, sizeof(buffer), "System Time written: %02d:%02d:%02d:%03d:%03d\r\n",
+             total_system_time.systemtime_h, total_system_time.systemtime_m,
+             total_system_time.systemtime_s, total_system_time.systemtime_ms,total_system_time.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
 	
 }
 
+//function to read total cycle time from flash memory
+TotalCycleTime read_total_cycle_time_in_flashmemory()
+{
+    
+    const uint32_t total_cycle_time_address = 0x08010000;
+	  TotalCycleTime read_totalcycle_time= *(TotalCycleTime*)total_cycle_time_address; // Read SystemTime from flash memory
+	  char buffer[100];
+	 // Format and transmit system time
+    snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d:%03d\r\n",
+             read_totalcycle_time.totalcycletime_h, read_totalcycle_time.totalcycletime_m,
+             read_totalcycle_time.totalcycletime_s, read_totalcycle_time.totalcycletime_ms);
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
+    return read_totalcycle_time;
+	}	
+	
 void write_total_cycle_time_in_flashmemory()
 {
     const uint32_t total_cycle_hours_address = 0x08010000;
 	  static SystemTime start_time, end_time; 
+	  
+	  //read total cycle hours from flash memory
+	  TotalCycleTime totalcycle_time_fromflash=read_total_cycle_time_in_flashmemory();
 
 	 //update the total cycle hours
 	 //start counting the total cycle hours when production flag is high and stop updating time when production flag is low
@@ -762,12 +793,12 @@ void write_total_cycle_time_in_flashmemory()
         end_time = system_time;		
 	 
 			
-		total_cycle_time.totalcycletime_h=end_time.systemtime_h-start_time.systemtime_h;
-		total_cycle_time.totalcycletime_m=end_time.systemtime_m-start_time.systemtime_m;
-	  total_cycle_time.totalcycletime_s=end_time.systemtime_s-start_time.systemtime_s;
-    total_cycle_time.totalcycletime_ms=end_time.systemtime_ms-start_time.systemtime_ms;
-
- 			
+		total_cycle_time.totalcycletime_h=(end_time.systemtime_h-start_time.systemtime_h)     + totalcycle_time_fromflash.totalcycletime_h ;
+		total_cycle_time.totalcycletime_m=(end_time.systemtime_m-start_time.systemtime_m)     + totalcycle_time_fromflash.totalcycletime_m;
+	  total_cycle_time.totalcycletime_s=(end_time.systemtime_s-start_time.systemtime_s)     + totalcycle_time_fromflash.totalcycletime_s;
+    total_cycle_time.totalcycletime_ms=(end_time.systemtime_ms-start_time.systemtime_ms)  + totalcycle_time_fromflash.totalcycletime_ms;
+    
+			
     uint32_t size_of_totalcycle_structure = sizeof(total_cycle_time);
     uint8_t totalcycle_byte_array[size_of_totalcycle_structure];    
 	  memcpy(totalcycle_byte_array, &total_cycle_time, size_of_totalcycle_structure);
@@ -793,99 +824,6 @@ void write_total_cycle_time_in_flashmemory()
 } 
 
 }
-
-
-
-    // Calculate total cycle hours in milliseconds
-   // if (Production)
-   // {
-     //   total_cycle_hours_ms = time.current_time_ms - time.current_time_ms;
-        // Convert total cycle hours into hours and minutes format
-		//	
-    //    hours = total_cycle_hours_ms / 3600000;
-    //    minutes = (total_cycle_hours_ms % 3600000) / 60000;
-  //      total_cycle_hours = (hours << 16) | minutes;
-  //  }
-   // else
-   // {
-     //   total_cycle_hours = 0;
-  //  }
-
-    //erase_flash_memory(5, FLASH_VOLTAGE_RANGE_3); // Assuming this function is defined elsewhere
-    //HAL_FLASH_Unlock();
-
-    // Save system hours to flash memory
-    //HAL_StatusTypeDef flash_system_hours_status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, system_hours_address, system_hours);
-    // Save cycle hours to flash memory
-    //HAL_StatusTypeDef flash_cycle_hours_status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, cycle_hours_address, total_cycle_hours);
-
-   // HAL_FLASH_Lock();
-//}
-//function to read system time from flash memory
-SystemTime read_systemtime_in_flashmemory()
-{
-    const uint32_t system_time_address = 0x08020000;
-    //const uint32_t cycle_hours_address = 0x08020004;
-	  SystemTime read_system_time= *(SystemTime*)system_time_address; // Read SystemTime from flash memory
-	  char buffer[100];
-	 // Format and transmit system time
-    snprintf(buffer, sizeof(buffer), "System Time read: %02d:%02d:%02d:%03d\r\n",
-             read_system_time.systemtime_h, read_system_time.systemtime_m,
-             read_system_time.systemtime_s, read_system_time.systemtime_ms);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
-
-    return read_system_time;
-	}
-
-//function to read total cycle time from flash memory
-TotalCycleTime read_total_cycle_time_in_flashmemory()
-{
-    
-    const uint32_t total_cycle_time_address = 0x08010000;
-	  TotalCycleTime read_totalcycle_time= *(TotalCycleTime*)total_cycle_time_address; // Read SystemTime from flash memory
-	  char buffer[100];
-	 // Format and transmit system time
-    snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d:%03d\r\n",
-             read_totalcycle_time.totalcycletime_h, read_totalcycle_time.totalcycletime_m,
-             read_totalcycle_time.totalcycletime_s, read_totalcycle_time.totalcycletime_ms);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
-
-    return read_totalcycle_time;
-	}	
-	
-	
-	
-	
-	/*
-    uint32_t read_system_hours = *(uint32_t*)system_hours_address;  // Read system hours from flash memory
-    uint32_t read_cycle_hours = *(uint32_t*)cycle_hours_address;    // Read cycle hours from flash memory
-    uint32_t system_hours, system_minutes;
-    uint32_t cycle_hours, cycle_minutes;
-    char buffer[100]; // Buffer to hold the string to be transmitted
-	  TimeComponents system_time;
-
-    // Extract hours and minutes from the stored system hours
-    system_hours = read_system_hours >> 16;
-    system_minutes = read_system_hours & 0xFFFF;
-    
-    // Extract hours and minutes from the stored cycle hours
-    cycle_hours = read_cycle_hours >> 16;
-    cycle_minutes = read_cycle_hours & 0xFFFF;
-	
-	  system_time.system_hours=system_hours;
-	  system_time.system_minutes=system_minutes;
-	  system_time.total_cycle_hours=cycle_hours;
-	  system_time.total_cycle_mins=cycle_minutes;
-
-    // Format and transmit system hours
-    snprintf(buffer, sizeof(buffer), "System Hours: %02d:%02d\r\n", system_hours, system_minutes);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
-    // Format and transmit cycle hours
-    snprintf(buffer, sizeof(buffer), "Cycle Hours: %02d:%02d\r\n", cycle_hours, cycle_minutes);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
-		return system_time;
-		}
-		*/
 
 
 
@@ -930,7 +868,9 @@ void idle_state()
 	static uint32_t Tankfill_timetrend_counter=0;
 	static uint32_t Tankfill_timetrend_code=0;
 	static uint32_t Tankfill_timetrend_passcode=0;
-	
+	uint32_t user_Tankfill_timetrend_passcode=0;
+
+
 	static bool prev_Tankfill_time=false,prev_Tankfill_timeexceed=false;
 	
 	//flags for each state in idel
@@ -990,12 +930,12 @@ if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
     // Turn on the solenoid after it has been off for 30 seconds
     cellfill_solenoid(true);
     Iscellfillsolenoid = true;
-    cellfill_solenoid_time = HAL_GetTick(); // Update the last change time
-} else if (Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 5000) {
+    cellfill_solenoid_time = system_time.ticks; // Update the last change time
+} else if (Iscellfillsolenoid && system_time.ticks - cellfill_solenoid_time >= 5000) {
     // Turn off the solenoid after it has been on for 5 seconds
     cellfill_solenoid(false);
     Iscellfillsolenoid = false;
-    cellfill_solenoid_time = HAL_GetTick(); // Update the last change time
+    cellfill_solenoid_time = system_time.ticks; // Update the last change time
 }
 	
 	
@@ -1040,9 +980,10 @@ if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
     }
 		
 		Tankfill_timeexceed=false;
-		
-		
-		
+		if (Tankfill_timetrend_passcode==user_Tankfill_timetrend_passcode)
+		{
+		Tankfill_time_trend_correctpasscode=true;
+		}
 	}
 	
 }
@@ -1099,6 +1040,12 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_ADC_Start(&hadc1);
 	I2C_Scan();
+  
+	
+	SystemTime start_time;
+	start_time=time_conversion();
+
+
 
   //testing for fault
   fault_circuit_board.counter = 1;
@@ -1109,7 +1056,8 @@ int main(void)
 	
   update_fault(&my_faults,FAULT_TYPE_CKT_B , &fault_circuit_board_count, fault_circuit_board);
 
-
+  //calculate the cycle hours
+	
 		
 		
     
@@ -1120,16 +1068,30 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   { 
-  //write_systemtime_in_flashmemory();
-	//HAL_Delay(5000);
-  //read_systemtime_in_flashmemory();   
-	//HAL_Delay(5000);
+
 	 Production=true;
 	 currentTime=HAL_GetTick();
 	 write_systemtime_in_flashmemory();
    read_systemtime_in_flashmemory();
 	 write_total_cycle_time_in_flashmemory();
-   read_total_cycle_time_in_flashmemory();	
+   read_total_cycle_time_in_flashmemory();
+		
+	 //update the system_time structure instance
+	 system_time=time_conversion();
+	 
+	 if (Production)
+	 {
+	  cycle_time.totalcycletime_h=system_time.systemtime_h - start_time.systemtime_h;
+	  cycle_time.totalcycletime_m=system_time.systemtime_m - start_time.systemtime_m;
+    cycle_time.totalcycletime_s=system_time.systemtime_s - start_time.systemtime_s;
+	  cycle_time.totalcycletime_ms=system_time.systemtime_ms - start_time.systemtime_ms;
+
+	 }
+	 
+    
+   
+    
+		
 		
 		
 //if (Production)
@@ -1139,7 +1101,7 @@ int main(void)
 		
 	if ((currentTime - lastSaveTime) >= 60000) //write after 1 minute
     {
-        //write_systemtime_in_flashmemory();
+        
      //   read_systemtime_in_flashmemory();
 			//  write_total_cycle_time_in_flashmemory();
 			//  read_total_cycle_time_in_flashmemory();
@@ -1155,13 +1117,13 @@ int main(void)
 		//HAL_UART_Receive_IT(&huart2,rx_data,sizeof(rx_data));
     
 		
-		/*
+		
    //write the system hours and cycle hours in flashmemory after every 1 minute
 		currentTime=HAL_GetTick();
 		
 		if ((currentTime - lastSaveTime) >= 60000) //write after 1 minute
     {
-        write_sys_cycle_hours_in_flashmemory();
+        //write_sys_cycle_hours_in_flashmemory();
         //read_sys_cycle_hours_in_flashmemory();
         lastSaveTime = currentTime; // Update the last save time
 			
@@ -1190,7 +1152,7 @@ int main(void)
 		
 		}
 		
-		*/
+		
 		
 		//unixTime++;
     
