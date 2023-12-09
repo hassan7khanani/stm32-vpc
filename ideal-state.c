@@ -110,12 +110,10 @@ typedef struct{
 
 //system hours structure
 typedef struct{
-    uint32_t systemtime_ms;
     uint32_t systemtime_s;
 	  uint32_t systemtime_m;
 	  uint32_t systemtime_h;
 	  uint32_t ticks;
-
 } SystemTime;
 
 
@@ -124,7 +122,6 @@ SystemTime system_time,total_system_time;
 //total cycle hours structure
 
 typedef struct{
-    uint32_t totalcycletime_ms;
     uint32_t totalcycletime_s;
 	  uint32_t totalcycletime_m;
 	  uint32_t totalcycletime_h;
@@ -331,7 +328,7 @@ float cell_current()
 	  // Prepare a buffer to send data on uart
     char tx_buffer[300];
     int n = sprintf(tx_buffer, "cell_control_fault_5sec_instance: %d \r\n", cell_control_fault_5sec_instance);
-		n+=sprintf(tx_buffer, "cell_control_system_hours %d, cell_control_system_mins%d,cell_control_system_sec %d,cell_control_system_ms%d  \r\n", cell_control_system_hours.systemtime_h,cell_control_system_hours.systemtime_m,cell_control_system_hours.systemtime_s,cell_control_system_hours.systemtime_ms);
+		n+=sprintf(tx_buffer, "cell_control_system_hours %d, cell_control_system_mins%d,cell_control_system_sec %d  \r\n", cell_control_system_hours.systemtime_h,cell_control_system_hours.systemtime_m,cell_control_system_hours.systemtime_s);
 		
 		           // sprintf(hours_buffer, "Cycle Hours: %s \r\n", formatTotalCycleTime(cell_control_cycle_hours));
 
@@ -372,6 +369,46 @@ bool NAOH_tank_level()
 	return status;
 }
 */
+
+// monitor salt tube bottom sensor
+bool salt_tube_bottom()
+{
+  //read the salt tube bottom sensor on pin PA0
+	GPIO_PinState status =HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_11);
+
+  //print the the salt tube bottom sensor on uart
+	if (status ==GPIO_PIN_SET)
+	{
+		  uint8_t tx_buffer[100]=" salt tube bottom sensor is high \n\r"; 
+      HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
+	}
+	else
+	{
+		  uint8_t tx_buffer[100]=" salt tube bottom sensor is low \n\r"; 
+      HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
+	}
+	return status;
+}
+// monitor salt tube Top sensor
+bool salt_tube_top()
+{
+  //read the salt tube top sensor on pin PA0
+	GPIO_PinState status =HAL_GPIO_ReadPin(GPIOA,GPIO_PIN_12);
+
+  //print the the salt tube top sensor on uart
+	if (status ==GPIO_PIN_SET)
+	{
+		  uint8_t tx_buffer[100]=" salt tube top sensor is high \n\r"; 
+      HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
+	}
+	else
+	{
+		  uint8_t tx_buffer[100]=" salt tube top sensor is low \n\r"; 
+      HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
+	}
+	return status;
+}
+
 //function to monitor HOCL tank level
 bool HOCL_tank_level()
 {
@@ -690,74 +727,172 @@ for(i=1; i<128; i++)
 }
 
 SystemTime time_conversion()
-{   
-	  //SystemTime time_converted
-	  SystemTime time_converted;
-	  uint32_t ticks =HAL_GetTick() %1000;
-	
-	  //convert time into min,hour,seconds
-	  time_converted.ticks=ticks;
- 	  time_converted.systemtime_ms = ticks %1000;
-    time_converted.systemtime_h = ticks / (1000 * 60 * 60); // 1 hour = 3,600,000 milliseconds
-    time_converted.systemtime_m = (ticks / (1000 * 60)) % 60;
-    time_converted.systemtime_s=  (ticks / 1000) % 60;
-	  return time_converted;
+{
+    // SystemTime time_converted
+    SystemTime time_converted;
+    static uint32_t prev_ticks = 0;
+    uint32_t current_ticks = HAL_GetTick();
+
+    // Calculate elapsed time in milliseconds
+    uint32_t elapsed_ms = current_ticks - prev_ticks;
+
+    // Handle rollover/reset of milliseconds
+    if (elapsed_ms >= 1000) {
+        elapsed_ms %= 1000;
+    }
+
+    // Update previous tick value
+    prev_ticks = current_ticks;
+
+    // Convert elapsed_ms into ms, s, m, h
+    time_converted.ticks = current_ticks;
+    uint32_t elapsed_seconds = current_ticks / 1000;
+    time_converted.systemtime_s = elapsed_seconds % 60;
+    uint32_t elapsed_minutes = elapsed_seconds / 60;
+    time_converted.systemtime_m = elapsed_minutes % 60;
+    uint32_t elapsed_hours = elapsed_minutes / 60;
+    time_converted.systemtime_h = elapsed_hours % 24; // Assuming you want a 24-hour format
+
+    char time_converted_buffer[150];
+    snprintf(time_converted_buffer, sizeof(time_converted_buffer), "time converted is : %02d:%02d:%02d:%03d\r\n",
+             time_converted.systemtime_h, time_converted.systemtime_m,
+             time_converted.systemtime_s, time_converted.ticks);
+    HAL_UART_Transmit(&huart2, (uint8_t*)time_converted_buffer, strlen(time_converted_buffer), 100);
+
+    return time_converted;
 }
 
-//function to read the system time from flash memory
+// Function to check if the system time is valid
+bool isValidSystemTime(const SystemTime *systemTime) {
+    // Check for valid hours, minutes, seconds, and ticks
+    if (systemTime->systemtime_h >= 0 && systemTime->systemtime_h < 24 &&
+        systemTime->systemtime_m >= 0 && systemTime->systemtime_m < 60 &&
+        systemTime->systemtime_s >= 0 && systemTime->systemtime_s < 60 &&
+        systemTime->ticks >= 0) {
+        return true; // Valid time
+    } else {
+        return false; // Invalid time
+    }
+}
 SystemTime read_systemtime_in_flashmemory()
 {
     const uint32_t system_time_address = 0x08020000;
-	
-	  SystemTime read_system_time= *(SystemTime*)system_time_address; // Read SystemTime from flash memory
-	  char buffer[150];
-	 // Format and transmit system time
-	snprintf(buffer, sizeof(buffer), "System Time read: %02d:%02d:%02d:%03d:%03d\r\n",
+    SystemTime read_system_time;
+
+    if (isValidSystemTime((SystemTime*)system_time_address)) {
+        read_system_time = *(SystemTime*)system_time_address; // Read SystemTime from flash memory
+
+        // Check for invalid time values
+        if (read_system_time.systemtime_h < 0 || read_system_time.systemtime_h > 23 ||
+            read_system_time.systemtime_m < 0 || read_system_time.systemtime_m > 59 ||
+            read_system_time.systemtime_s < 0 || read_system_time.systemtime_s > 59) {
+            // Initialize to 00:00:00.000 if any value is invalid
+            read_system_time.systemtime_h = 0;
+            read_system_time.systemtime_m = 0;
+            read_system_time.systemtime_s = 0;
+            read_system_time.ticks = 0;
+        }
+    } else {
+        // Initialize to 00:00:00.000 if the system time in flash is not valid
+        read_system_time.systemtime_h = 0;
+        read_system_time.systemtime_m = 0;
+        read_system_time.systemtime_s = 0;
+        read_system_time.ticks = 0;
+    }
+
+    char buffer[150];
+    // Format and transmit system time
+    snprintf(buffer, sizeof(buffer), "System Time read: %02d:%02d:%02d:%03d\r\n",
              read_system_time.systemtime_h, read_system_time.systemtime_m,
-             read_system_time.systemtime_s, read_system_time.systemtime_ms,read_system_time.ticks);
+             read_system_time.systemtime_s, read_system_time.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
 
     return read_system_time;
-	}
+}
 
 
-//function to write the total system hours into flash memory
+//function to read the system time from flash memory
 void write_systemtime_in_flashmemory()
 {
     const uint32_t system_hours_address = 0x08020000;
-	  uint32_t size_of_system_structure = sizeof(system_time);
-    uint8_t sytemtime_byte_array[size_of_system_structure];    
-	
-	  //read system time from flash memory
-	  SystemTime system_time_fromflash=read_systemtime_in_flashmemory();
-	  //get the current system hours from time conversion function
-	  //system_time=time_conversion();
-	  //update the systemtime structure
-	  total_system_time.systemtime_ms = system_time.systemtime_ms + system_time_fromflash.systemtime_ms;
-    total_system_time.systemtime_h  = system_time.systemtime_h  + system_time_fromflash.systemtime_h;
-    total_system_time.systemtime_m  = system_time.systemtime_m  + system_time_fromflash.systemtime_m;
-    total_system_time.systemtime_s  = system_time.systemtime_s  + system_time_fromflash.systemtime_s;
-	  total_system_time.ticks         = system_time.ticks         + system_time_fromflash.ticks;
-	
+    uint32_t size_of_system_structure = sizeof(system_time);
+    uint8_t sytemtime_byte_array[size_of_system_structure];
+	  static bool read_time=false;
+	  static uint32_t total_seconds_flash=0;
+	  static uint32_t total_seconds=0;
+    static uint32_t total_seconds_current;
+    // Read system time from flash memory
+	  SystemTime system_time_fromflash ;
 
-    //convert systemtime structure into the byte array
-	  memcpy(sytemtime_byte_array, &system_time, size_of_system_structure);
+	  if (!read_time)
+		{
+		system_time_fromflash = read_systemtime_in_flashmemory();	
+    char read_system_time_fromflash_buffer[150];
+    snprintf(read_system_time_fromflash_buffer, sizeof(read_system_time_fromflash_buffer), 
+             "!!!!! System Time received from flash: %02d:%02d:%02d:%03d\r\n",
+             system_time_fromflash.systemtime_h, system_time_fromflash.systemtime_m,
+             system_time_fromflash.systemtime_s, system_time_fromflash.ticks);
+    HAL_UART_Transmit(&huart2, (uint8_t*)read_system_time_fromflash_buffer, strlen(read_system_time_fromflash_buffer), 100);			
+	  
+		// Convert system times to seconds
+		total_seconds_flash = system_time_fromflash.systemtime_h * 3600 + system_time_fromflash.systemtime_m * 60 + system_time_fromflash.systemtime_s;
+		char total_seconds_flash_buffer[150];
+		snprintf(total_seconds_flash_buffer, sizeof(total_seconds_flash_buffer), "!!!!! Total seconds flash system time: %u\r\n", total_seconds_flash);
+		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_flash_buffer, strlen(total_seconds_flash_buffer), 100) ; 		
+			
+		read_time=true;
+		}	
+			
+	  //get the current system time
+	  SystemTime current_time=time_conversion();
+    char system_time_buffer[150];
+    snprintf(system_time_buffer, sizeof(system_time_buffer), " --- current system time: %02d:%02d:%02d:%03d\r\n",
+             system_time.systemtime_h, system_time.systemtime_m,
+             system_time.systemtime_s, system_time.ticks);
+    HAL_UART_Transmit(&huart2, (uint8_t*)system_time_buffer, strlen(system_time_buffer), 100);
+
+    // Calculate total seconds for current system time
+	  total_seconds_current = system_time.systemtime_h * 3600 + system_time.systemtime_m * 60 + system_time.systemtime_s;
+		char total_seconds_current_buffer[150];
+		snprintf(total_seconds_current_buffer, sizeof(total_seconds_current_buffer), "--- Total seconds current system time: %u\r\n", total_seconds_current);
+		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_current_buffer, strlen(total_seconds_current_buffer), 100);
+
+    // Add the seconds
+    total_seconds = total_seconds_flash + total_seconds_current;
+		char total_seconds_buffer[150];
+		snprintf(total_seconds_buffer, sizeof(total_seconds_buffer), "--- Total seconds total system time: %u\r\n", total_seconds);
+		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_buffer, strlen(total_seconds_buffer), 100);    
+		
+    // Convert back to hours, minutes, and seconds
+     total_system_time.systemtime_h = total_seconds / 3600;
+     total_seconds %= 3600;
+     total_system_time.systemtime_m = total_seconds / 60;
+     total_system_time.systemtime_s = total_seconds % 60;
+
+    char total_system_time_buffer[150];
+    snprintf(total_system_time_buffer, sizeof(total_system_time_buffer), 
+             "!!!!! System Time received from flash: %02d:%02d:%02d:%03d\r\n",
+             total_system_time.systemtime_h, total_system_time.systemtime_m,
+             total_system_time.systemtime_s,total_system_time.ticks);
+    HAL_UART_Transmit(&huart2, (uint8_t*)total_system_time_buffer, strlen(total_system_time_buffer), 100);		
+
+
+    // Convert systemtime structure into the byte array
+    memcpy(sytemtime_byte_array, &total_system_time, size_of_system_structure);
 
     // Erase the flash memory before writing
     erase_flash_memory(5, FLASH_VOLTAGE_RANGE_3); // Adjust the erase function parameters as necessary
 
     // Write the byte array to flash memory
-   //	Program a word (32-bit) at a specified address
-    write_to_flash(system_hours_address,sytemtime_byte_array,size_of_system_structure,FLASH_TYPEPROGRAM_BYTE);
-	 //write_to_flash(fault_log_address, data, sizeof(my_faults),FLASH_TYPEPROGRAM_BYTE);
-	 
-	  char buffer[150];
-    snprintf(buffer, sizeof(buffer), "System Time written: %02d:%02d:%02d:%03d:%03d\r\n",
+    write_to_flash(system_hours_address, sytemtime_byte_array, size_of_system_structure, FLASH_TYPEPROGRAM_BYTE);
+
+    char buffer[150];
+    snprintf(buffer, sizeof(buffer), "System Time written on flash: %02d:%02d:%02d:%03d\r\n",
              total_system_time.systemtime_h, total_system_time.systemtime_m,
-             total_system_time.systemtime_s, total_system_time.systemtime_ms,total_system_time.ticks);
+             total_system_time.systemtime_s, total_system_time.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
-	
 }
+
 
 //function to read total cycle time from flash memory
 TotalCycleTime read_total_cycle_time_in_flashmemory()
@@ -767,9 +902,9 @@ TotalCycleTime read_total_cycle_time_in_flashmemory()
 	  TotalCycleTime read_totalcycle_time= *(TotalCycleTime*)total_cycle_time_address; // Read SystemTime from flash memory
 	  char buffer[100];
 	 // Format and transmit system time
-    snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d:%03d\r\n",
+    snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d\r\n",
              read_totalcycle_time.totalcycletime_h, read_totalcycle_time.totalcycletime_m,
-             read_totalcycle_time.totalcycletime_s, read_totalcycle_time.totalcycletime_ms);
+             read_totalcycle_time.totalcycletime_s);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
     return read_totalcycle_time;
 	}	
@@ -785,18 +920,18 @@ void write_total_cycle_time_in_flashmemory()
 	 //update the total cycle hours
 	 //start counting the total cycle hours when production flag is high and stop updating time when production flag is low
 	   
-    if (Production && (start_time.systemtime_h == 0 && start_time.systemtime_m == 0 && start_time.systemtime_s == 0 && start_time.systemtime_ms == 0)) {
+    if (Production && (start_time.systemtime_h == 0 && start_time.systemtime_m == 0 && start_time.systemtime_s == 0)) {
 	   start_time = system_time;
 	  }
 	
-    if (!Production && (start_time.systemtime_h != 0 || start_time.systemtime_m != 0 || start_time.systemtime_s != 0 || start_time.systemtime_ms != 0)) {
+    if (!Production && (start_time.systemtime_h != 0 || start_time.systemtime_m != 0 || start_time.systemtime_s != 0)) {
         end_time = system_time;		
 	 
 			
 		total_cycle_time.totalcycletime_h=(end_time.systemtime_h-start_time.systemtime_h)     + totalcycle_time_fromflash.totalcycletime_h ;
 		total_cycle_time.totalcycletime_m=(end_time.systemtime_m-start_time.systemtime_m)     + totalcycle_time_fromflash.totalcycletime_m;
 	  total_cycle_time.totalcycletime_s=(end_time.systemtime_s-start_time.systemtime_s)     + totalcycle_time_fromflash.totalcycletime_s;
-    total_cycle_time.totalcycletime_ms=(end_time.systemtime_ms-start_time.systemtime_ms)  + totalcycle_time_fromflash.totalcycletime_ms;
+   // total_cycle_time.totalcycletime_ms=(end_time.systemtime_ms-start_time.systemtime_ms)  + totalcycle_time_fromflash.totalcycletime_ms;
     
 			
     uint32_t size_of_totalcycle_structure = sizeof(total_cycle_time);
@@ -814,9 +949,9 @@ void write_total_cycle_time_in_flashmemory()
 	 
 	 
 	  char buffer[100];
-    snprintf(buffer, sizeof(buffer), "Total Cycle Time written: %02d:%02d:%02d:%03d\r\n",
+    snprintf(buffer, sizeof(buffer), "Total Cycle Time written: %02d:%02d:%02d\r\n",
                  total_cycle_time.totalcycletime_h, total_cycle_time.totalcycletime_m, 
-                 total_cycle_time.totalcycletime_s, total_cycle_time.totalcycletime_ms);
+                 total_cycle_time.totalcycletime_s);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
 	  
 		// Reset start_time for next cycle
@@ -825,6 +960,87 @@ void write_total_cycle_time_in_flashmemory()
 
 }
 
+// continously check if the current value is greater than 0 for 5 seconds then raise fault
+bool cell_current_greater_than_zero() {
+	  
+    uint32_t startTime = 0; //variable to hold the start time
+    uint32_t threshold = 5; // 5 seconds 
+    if (cell_current > 0) {
+        if (startTime == 0) {
+            
+            startTime = system_time.systemtime_s ;
+        } 
+				
+				else if (system_time.systemtime_s - startTime > threshold) {
+					
+            // cell_current has been greater than zero for more than 5 seconds
+            char buffer[120]=("Current greater than zero for more than 5 seconds\n");
+					  HAL_UART_Transmit(&huart2,(uint8_t *)buffer,sizeof(buffer),100);
+            HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_RESET);
+            // Reset startTime
+            startTime = 0;
+					  return true;
+        }
+    } 
+		
+		
+		else {
+        // Reset startTime if cell_current is not greater than zero
+			  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_SET);
+        startTime = 0;
+			  return false;
+    }
+		return 0;
+}
+
+
+
+//salt tube brine conductivity
+bool salt_tube_filled_time()
+{
+
+}
+
+
+
+
+
+
+
+
+
+
+//fucntion to check low pressure for 2 hours
+bool low_pressure_check()
+{
+  // check if the pressure status is low for more than 2 hours then
+	uint32_t startTime=0;
+	uint32_t threshold = 2; // 2 hours
+	if(!monitor_pressure())
+	{
+		
+	if (startTime == 0) { 
+  startTime = system_time.systemtime_h ;
+  } 
+	
+	else if (system_time.systemtime_h - startTime > threshold) {
+            char buffer[120]=("Pressure is low for more than 2 hours \n");
+					  HAL_UART_Transmit(&huart2,(uint8_t *)buffer,sizeof(buffer),100);
+            HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_RESET);
+            // Reset startTime
+            startTime = 0;
+					  return true;
+        }	
+	}
+
+	else {
+        // Reset startTime if pressure is not low for more than 2 hours
+			  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_SET);
+        startTime = 0;
+			  return false;
+    }
+   return false;
+}
 
 
 
@@ -872,14 +1088,6 @@ void idle_state()
 
 
 	static bool prev_Tankfill_time=false,prev_Tankfill_timeexceed=false;
-	
-	//flags for each state in idel
- // static bool Idel_systemready_state=false;
-	//static bool Idel_tanksfull_state=false;
-	//static bool Idel_tankfill_timeexceeded_state=false;
-	//static bool Idel_lowpressure_state=false;
-	       
-
 	
 	uint8_t current_value=0;
   current_value=cell_current();
@@ -1044,8 +1252,8 @@ int main(void)
 	
 	SystemTime start_time;
 	start_time=time_conversion();
-
-
+  //erase_flash_memory(5, FLASH_VOLTAGE_RANGE_3);
+  //write_systemtime_in_flashmemory();
 
   //testing for fault
   fault_circuit_board.counter = 1;
@@ -1070,11 +1278,8 @@ int main(void)
   { 
 
 	 Production=true;
-	 currentTime=HAL_GetTick();
-	 write_systemtime_in_flashmemory();
-   read_systemtime_in_flashmemory();
-	 write_total_cycle_time_in_flashmemory();
-   read_total_cycle_time_in_flashmemory();
+   currentTime=system_time.systemtime_s;	 
+		//write_systemtime_in_flashmemory();
 		
 	 //update the system_time structure instance
 	 system_time=time_conversion();
@@ -1084,50 +1289,23 @@ int main(void)
 	  cycle_time.totalcycletime_h=system_time.systemtime_h - start_time.systemtime_h;
 	  cycle_time.totalcycletime_m=system_time.systemtime_m - start_time.systemtime_m;
     cycle_time.totalcycletime_s=system_time.systemtime_s - start_time.systemtime_s;
-	  cycle_time.totalcycletime_ms=system_time.systemtime_ms - start_time.systemtime_ms;
+	  
 
 	 }
 	 
-    
-   
-    
-		
-		
-		
-//if (Production)
-	////{
-	// write_total_cycle_time_in_flashmemory();
-	 //	}
-		
-	if ((currentTime - lastSaveTime) >= 60000) //write after 1 minute
-    {
-        
-     //   read_systemtime_in_flashmemory();
-			//  write_total_cycle_time_in_flashmemory();
-			//  read_total_cycle_time_in_flashmemory();
-			  //Production=false;
+   //write the system hours in flashmemory after every 1 minute
+	if ((currentTime - lastSaveTime) >= 6) //write after 1 minute
+    { 
+			  uint8_t buffer[150]=" !!!! writing time into flash memory";
+			  HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
+        write_systemtime_in_flashmemory();
         lastSaveTime = currentTime; // Update the last save time
-			
     }
 	 
-	
-	
+		
+		
 
-		
-		//HAL_UART_Receive_IT(&huart2,rx_data,sizeof(rx_data));
-    
-		
-		
-   //write the system hours and cycle hours in flashmemory after every 1 minute
-		currentTime=HAL_GetTick();
-		
-		if ((currentTime - lastSaveTime) >= 60000) //write after 1 minute
-    {
-        //write_sys_cycle_hours_in_flashmemory();
-        //read_sys_cycle_hours_in_flashmemory();
-        lastSaveTime = currentTime; // Update the last save time
-			
-    }
+
 		//read_sys_cycle_hours_in_flashmemory();
 		measure_current();
 		HAL_GetTick();
@@ -1135,6 +1313,8 @@ int main(void)
     drain_solenoid();
 		NAOH_tank_level();
 		HOCL_tank_level();
+		salt_tube_bottom();
+		salt_tube_top();
     sprintf(tickStr, "HAL_Tick: %d\n\r", HAL_GetTick());
     HAL_UART_Transmit(&huart2, (uint8_t *)tickStr, sizeof(tickStr), 300);
     counter++;
@@ -1144,18 +1324,14 @@ int main(void)
 		idle_state();
 		}
 		
+		
 		if (Start_signal && !Idel_systemready_state && !Idel_tanksfull_state && !Idel_tankfill_timeexceeded_state && !Idel_lowpressure_state)
 		{
-		
-		
-		
-		
+
 		}
 		
 		
 		
-		//unixTime++;
-    
 
 
 	
