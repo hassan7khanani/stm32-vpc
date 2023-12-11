@@ -409,6 +409,70 @@ bool salt_tube_top()
 	return status;
 }
 
+
+
+
+//function to fill if the salt tube
+bool fill_salt_tube()
+{
+    static uint32_t fill_time_limit = 90;
+    static uint32_t start_time_s, start_time_m;
+    static bool filling_started = false;
+
+    char tx_buffer[150];
+    int n = sprintf(tx_buffer, "----In fill salt tube function--- start time is :%d:%d system time seconds are :%d\r\n", start_time_m, start_time_s, system_time.systemtime_s);
+    HAL_UART_Transmit(&huart2, (uint8_t *)tx_buffer, sizeof(tx_buffer), 130);
+
+    if (!salt_tube_bottom() && !salt_tube_top())
+    {
+        if (!filling_started)
+        {
+            start_time_s = system_time.systemtime_s;
+            start_time_m = system_time.systemtime_m; // Set the start time when filling starts
+            n = sprintf(tx_buffer, "------- start time is :%d:%d \r\n", start_time_m, start_time_s);
+            filling_started = true;
+        }
+
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_SET); // Start filling
+        uint8_t buff[100] = "Salt tube filling started";
+        HAL_UART_Transmit(&huart2, buff, sizeof(buff), 120);
+
+        // Calculate elapsed time in seconds
+        uint32_t elapsed_time = (system_time.systemtime_m * 60 + system_time.systemtime_s) - (start_time_m * 60 + start_time_s);
+        n = sprintf(tx_buffer, "elapsed time is :%d\r\n", elapsed_time);
+        //HAL_UART_Transmit(&huart2, (uint8_t *)tx_buffer, sizeof(tx_buffer), 150);
+
+        // Check if the salt tube is filled within 90 seconds
+        if (salt_tube_top() && elapsed_time <= fill_time_limit)
+        {
+            
+            HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET); //stop filling as salt tube is filled
+					  filling_started = false;
+            return true;
+        }
+        else if (elapsed_time > fill_time_limit)
+        {
+            uint8_t buffer[100] = "-----Salt tube not filled in 90 seconds------";
+            HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 100);
+        }
+    }
+
+    // Stop filling when both sensors are high
+    if (salt_tube_bottom() && salt_tube_top())
+    {
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET); // Stop filling
+        uint8_t buff[100] = "Salt tube filling stopped";
+        //HAL_UART_Transmit(&huart2, buff, sizeof(buff), 50);
+        filling_started = false;
+        return false;
+    }
+
+    // If function reaches here, it means filling wasn't successful within the time limit
+    return false;
+}
+
+
+
 //function to monitor HOCL tank level
 bool HOCL_tank_level()
 {
@@ -523,6 +587,23 @@ void pH_HOCL_initialization()
 
 	}
 }
+
+void salttube_brineconductivity_initialization()
+{
+  if(HAL_I2C_IsDeviceReady(&hi2c1,0X65,1,100)==HAL_OK)
+	{
+  uint8_t tx_buffer[100]="Communication started on I2C with salt tube brine conductivity sensor\n\r"; 
+  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
+	
+}
+	else
+	{
+	uint8_t tx_buffer[100]="Error in Communicating with pH salt tube brine conductivity sensor on I2C \n\r"; 
+  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
+
+	}
+}
+
 
 //function to start I2C communication with flowmeter NAOH on I2C
 void measure_flow_NAOH()
@@ -814,7 +895,7 @@ SystemTime read_systemtime_in_flashmemory()
 //function to read the system time from flash memory
 void write_systemtime_in_flashmemory()
 {
-    const uint32_t system_hours_address = 0x08020000;
+    const uint32_t system_hours_address = 0x08030000; //sector 4
     uint32_t size_of_system_structure = sizeof(system_time);
     uint8_t sytemtime_byte_array[size_of_system_structure];
 	  static bool read_time=false;
@@ -963,12 +1044,17 @@ void write_total_cycle_time_in_flashmemory()
 // continously check if the current value is greater than 0 for 5 seconds then raise fault
 bool cell_current_greater_than_zero() {
 	  
-    uint32_t startTime = 0; //variable to hold the start time
-    uint32_t threshold = 5; // 5 seconds 
+    static uint8_t startTime = 0; //variable to hold the start time
+    uint32_t threshold = 5; // 5 seconds
+	  
+    char tx_buff[60];	
     if (cell_current > 0) {
         if (startTime == 0) {
             
             startTime = system_time.systemtime_s ;
+					  //tx_buff[120]="start time of cell current >0 is",startTime;
+					  sprintf(tx_buff, " ----start time of cell current >0 is %d------ \r\n", startTime);					  
+					  HAL_UART_Transmit(&huart2,(uint8_t*)tx_buff,sizeof(tx_buff),160);
         } 
 				
 				else if (system_time.systemtime_s - startTime > threshold) {
@@ -993,54 +1079,65 @@ bool cell_current_greater_than_zero() {
 		return 0;
 }
 
+bool monitor_salttube_brine_conductivity()
+{
 
+
+
+
+
+
+
+
+return false;
+}
 
 //salt tube brine conductivity
 bool salt_tube_filled_time()
 {
-
+return false;
 }
-
-
-
-
-
-
-
-
 
 
 //fucntion to check low pressure for 2 hours
-bool low_pressure_check()
-{
-  // check if the pressure status is low for more than 2 hours then
-	uint32_t startTime=0;
-	uint32_t threshold = 2; // 2 hours
-	if(!monitor_pressure())
-	{
-		
-	if (startTime == 0) { 
-  startTime = system_time.systemtime_h ;
-  } 
-	
-	else if (system_time.systemtime_h - startTime > threshold) {
-            char buffer[120]=("Pressure is low for more than 2 hours \n");
-					  HAL_UART_Transmit(&huart2,(uint8_t *)buffer,sizeof(buffer),100);
-            HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_RESET);
-            // Reset startTime
-            startTime = 0;
-					  return true;
-        }	
-	}
+bool low_pressure_check() {
+    static uint32_t start_time_h = 0, start_time_m = 0;
+    const  uint32_t threshold_seconds = 2 * 3600; // 2 hours in seconds (2*60*60)
+	  static uint32_t start_time_seconds=0;
+    static uint32_t current_time_seconds=0;
+	  static uint32_t elapsed_time_seconds=0;
+    if (!monitor_pressure()) {
+        if (start_time_h == 0 && start_time_m == 0) {
+            start_time_h = system_time.systemtime_h;
+            start_time_m = system_time.systemtime_m;
+        }
 
-	else {
-        // Reset startTime if pressure is not low for more than 2 hours
-			  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_SET);
-        startTime = 0;
-			  return false;
+        // Convert start time and current time to seconds
+         start_time_seconds = (start_time_h * 3600) + (start_time_m * 60);
+         current_time_seconds = (system_time.systemtime_h * 3600) + (system_time.systemtime_m * 60);
+
+        // Calculate elapsed time in seconds
+         elapsed_time_seconds = current_time_seconds - start_time_seconds;
+
+        if (elapsed_time_seconds >= threshold_seconds) {
+            char buffer[120] = "Pressure is low for more than 2 hours\n";
+            HAL_UART_Transmit(&huart2, (uint8_t *)buffer, sizeof(buffer), 100);
+            //HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+            // Reset start time
+            start_time_h = 0;
+            start_time_m = 0;
+            return true;
+        }
+    } else {
+        // Reset start time if pressure is not low
+        //HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
+        start_time_h = 0;
+        start_time_m = 0;
+        return false;
     }
-   return false;
+    return false;
 }
+
 
 
 
@@ -1315,8 +1412,10 @@ int main(void)
 		HOCL_tank_level();
 		salt_tube_bottom();
 		salt_tube_top();
-    sprintf(tickStr, "HAL_Tick: %d\n\r", HAL_GetTick());
-    HAL_UART_Transmit(&huart2, (uint8_t *)tickStr, sizeof(tickStr), 300);
+		fill_salt_tube();
+		cell_current_greater_than_zero();
+    //sprintf(tickStr, "HAL_Tick: %d\n\r", HAL_GetTick());
+   // HAL_UART_Transmit(&huart2, (uint8_t *)tickStr, sizeof(tickStr), 280);
     counter++;
 		
 		if (!Start_signal)	
