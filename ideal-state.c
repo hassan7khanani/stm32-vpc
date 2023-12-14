@@ -62,11 +62,22 @@ RTC_DateTypeDef sDate ;
 RTC_AlarmTypeDef sAlarm ;
 
 
+//global variables for functions
+float voltage=0,current=0;
+float flow=0;	
+float ph_NAOH_value=0,ph_HOCL_value=0;
+float brine_conc_value=0;
 
 
-uint16_t readvalue;
-float voltage,current,raw_voltage;
-float sensitivity=0.1;
+
+//flags for each function to monitor faults
+bool cell_voltage_fault=false;
+bool flow_fault=false;
+bool low_pressure_fault=false;
+bool ph_HOCL_fault=false;
+bool ph_NAOH_fault=false;
+bool brine_conductivity=false;
+bool no_board_power_fault=false;
 
 time_t unixTime;
 struct tm timeinfo;
@@ -85,6 +96,28 @@ static uint32_t lastSaveTime = 0;
 uint32_t system_hours = 0;
 uint32_t total_cycle_hours = 0;
 uint32_t hours = 0, minutes = 0;
+
+//structure for cell A,B and C
+
+typedef struct
+{
+ float cell_voltage;
+ float cell_current;
+} Measurements ;
+Measurements main_cell;
+
+//structure for cell A,B and C
+typedef struct
+{
+ float cellA_voltage;
+ float cellA_current;
+ float cellB_voltage;
+ float cellB_current;
+ float cellC_voltage;
+ float cellC_current;
+} CellsMeasurement;
+
+
 
 /*
 typedef struct {
@@ -117,17 +150,17 @@ typedef struct{
 } SystemTime;
 
 
-SystemTime system_time,total_system_time;
+SystemTime system_time,total_system_time, start_time;
 
 //total cycle hours structure
 
 typedef struct{
-    uint32_t totalcycletime_s;
-	  uint32_t totalcycletime_m;
-	  uint32_t totalcycletime_h;
+    uint32_t cycletime_s;
+	  uint32_t cycletime_m;
+	  uint32_t cycletime_h;
 } TotalCycleTime;
 
-TotalCycleTime total_cycle_time,cycle_time;
+TotalCycleTime total_cycle_time,current_cycle_time,HOCL_cycle_time,NAOH_cycle_time;
 
 
 //for faults
@@ -201,17 +234,28 @@ uint32_t TankFill_time=20;
 uint8_t rx_data[100];
 
 // for production
-bool Masterflag=false;
+bool MasterFault=false;
 bool Stop_signal=false;
 bool Start_signal=false;
 bool Resume_signal=false;
-bool Production=true;
+bool Production=false;
+
 
 //flags for each state in idel
+bool Idel =false;
 bool Idel_systemready_state=false;
 bool Idel_tanksfull_state=false;
 bool Idel_tankfill_timeexceeded_state=false;
 bool Idel_lowpressure_state=false;
+
+
+//flags for production state
+bool Priming_sequence=false;
+bool Production_productionON=false;
+bool Flusing_sequence=false;
+bool Tank_fill_timer_expired=false;
+//
+
 
 
 /* USER CODE END PV */
@@ -237,7 +281,7 @@ static void MX_USART1_UART_Init(void);
 
 
 
-time_t getUnixTime()
+time_t getUnixTime(void)
 {
 		char Time[50];
 		char Date[50];
@@ -267,87 +311,140 @@ time_t getUnixTime()
 
 
 //calculate current and voltage
-float measure_current(void) {
-
+Measurements measure_current(void) {
     uint16_t readvalue;
-    float raw_voltage;
-    float current;
+    const int num_samples = 10;
+    float sum_readvalue = 0;
+    float average_readvalue;
+    const float sensitivity = 0.1;
 
-    // Measure voltage using ADC
-    HAL_ADC_PollForConversion(&hadc1, 1000);
-    readvalue = HAL_ADC_GetValue(&hadc1);
-   // readvalue=3000; hardcoded value for testing
-
-    // Convert ADC value to voltage
-    raw_voltage = (float)readvalue * 3.3  / 4096;
-	
-
-    // Adjust for tolerance in voltage divider resistor & ADC accuracy
-    if (raw_voltage != 2.5) {
-        raw_voltage *= 1.035;
+    // Take 10 samples of analog reading
+    for (int i = 0; i < num_samples; i++) {
+        HAL_ADC_PollForConversion(&hadc1, 1000);
+        readvalue = HAL_ADC_GetValue(&hadc1);
+        sum_readvalue += readvalue;
     }
 
-    // Calculate current
-    current = (raw_voltage - 2.5) / sensitivity;
-		
-		//print voltage on uart
-		char voltage_value[30];
-		sprintf(voltage_value,"voltage is %f \t\n\r " ,raw_voltage);
-    HAL_UART_Transmit(&huart2, (uint8_t*)voltage_value, sizeof(voltage_value), 300);		
-		
-    //print current on uart
-		char current_value[30];
-		sprintf(current_value,"current is %f \t\n\r " ,current);
+    // Calculate average of the readings
+    average_readvalue = sum_readvalue / num_samples;
+
+    // Convert average ADC value to voltage
+     main_cell.cell_voltage = average_readvalue * 3.3 / 4096;
+
+    // Adjust for tolerance in voltage divider resistor & ADC accuracy
+    if (main_cell.cell_voltage != 2.5) {
+        main_cell.cell_voltage *= 1.035;
+    }
+
+    // Calculate current based on average voltage
+    main_cell.cell_current = (main_cell.cell_voltage - 2.5) / sensitivity;
+
+    // Print voltage on uart
+    char voltage_value[50];
+    sprintf(voltage_value, "Average voltage is %f \t\n\r ", main_cell.cell_voltage);
+    HAL_UART_Transmit(&huart2, (uint8_t*)voltage_value, sizeof(voltage_value), 300);
+
+    // Print current on uart
+    char current_value[50];
+    sprintf(current_value, "Average current is %f \t\n\r ", main_cell.cell_current);
     HAL_UART_Transmit(&huart2, (uint8_t*)current_value, sizeof(current_value), 300);
 
-		return current;
+    return main_cell;
 }
 
-//function to check cell current is greater than 0 for less than 5 seconds
-float cell_current()
-{
-	static uint8_t  cell_control_fault_5sec_instance=0;
-	TotalCycleTime  cell_control_cycle_hours;
-	SystemTime cell_control_system_hours;
-	char cell_control_cycle_hours_buffer[100];
-	char cell_control_system_hours_buffer[100];
-	//SystemTime 
-
-  float current_value=measure_current();
-	//float current_value=5.74;  hardcoded value for testing
-
-	if (current_value > 0)
-	{
-	 cellcurrent_starttime=HAL_GetTick();
-	 if (HAL_GetTick()-cellcurrent_starttime < 5000)	
-	{
-	  cell_control_fault_5sec_instance++;	
-	  cell_control_system_hours = system_time;
-		cell_control_cycle_hours=total_cycle_time;
-
-	  // Prepare a buffer to send data on uart
-    char tx_buffer[300];
-    int n = sprintf(tx_buffer, "cell_control_fault_5sec_instance: %d \r\n", cell_control_fault_5sec_instance);
-		n+=sprintf(tx_buffer, "cell_control_system_hours %d, cell_control_system_mins%d,cell_control_system_sec %d  \r\n", cell_control_system_hours.systemtime_h,cell_control_system_hours.systemtime_m,cell_control_system_hours.systemtime_s);
-		
-		           // sprintf(hours_buffer, "Cycle Hours: %s \r\n", formatTotalCycleTime(cell_control_cycle_hours));
-
-    HAL_UART_Transmit(&huart2,(uint8_t *)tx_buffer,sizeof(tx_buffer),100);
-
-	}
+CellsMeasurement measure_cells_current_voltages()
+{   
+	  // take the 10 samples for each each of the cell A ,B and C and calculate the current and voltages values. and update the structure
+	  CellsMeasurement cells;
+    uint16_t readvalue;
+    const int num_samples = 10;
+    uint16_t sum_readvalue = 0;
+    float average_readvalue;
+    const float sensitivity = 0.1;
 	
-	else 
-	{
-	 uint8_t tx_buffer[100]="cell current is greater than 0";
-	 HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
-	}
+    // calculation for  Cell A
+    // Take 10 samples of analog reading
+    for (int i = 0; i < num_samples; i++) {
+        HAL_ADC_PollForConversion(&hadc1, 1000);
+        readvalue = HAL_ADC_GetValue(&hadc1);
+        sum_readvalue += readvalue;
+    }	
+    // Calculate average of the readings
+    average_readvalue = sum_readvalue / num_samples;
+    // Convert average ADC value to voltage
+    cells.cellA_voltage = average_readvalue * 3.3 / 4096;
 
-}
-return current_value;
+    // Adjust for tolerance in voltage divider resistor & ADC accuracy
+    if (cells.cellA_voltage != 2.5) {
+        cells.cellA_voltage *= 1.035;
+    }
+    // Calculate current based on average voltage
+    cells.cellA_current= (cells.cellA_voltage - 2.5) / sensitivity;
+    
+		sum_readvalue=0;
+		average_readvalue=0;
+		
 
+    // calculation for Cell B
+    // Take 10 samples of analog reading
+    for (int i = 0; i < num_samples; i++) {
+        HAL_ADC_PollForConversion(&hadc1, 1000);
+        readvalue = HAL_ADC_GetValue(&hadc1);
+        sum_readvalue += readvalue;
+    }	
+    // Calculate average of the readings
+    average_readvalue = sum_readvalue / num_samples;
+    // Convert average ADC value to voltage
+    cells.cellB_voltage = average_readvalue * 3.3 / 4096;
+
+    // Adjust for tolerance in voltage divider resistor & ADC accuracy
+    if (cells.cellB_voltage != 2.5) {
+        cells.cellB_voltage *= 1.035;
+    }
+    // Calculate current based on average voltage
+    cells.cellB_current = (cells.cellB_voltage - 2.5) / sensitivity;
+
+		sum_readvalue=0;
+		average_readvalue=0;
+		
+		
+    // calculation for for Cell C
+    // Take 10 samples of analog reading
+    for (int i = 0; i < num_samples; i++) {
+        HAL_ADC_PollForConversion(&hadc1, 1000);
+        readvalue = HAL_ADC_GetValue(&hadc1);
+        sum_readvalue += readvalue;
+    }	
+    // Calculate average of the readings
+    average_readvalue = sum_readvalue / num_samples;
+    // Convert average ADC value to voltage
+    cells.cellC_voltage = average_readvalue * 3.3 / 4096;
+
+    // Adjust for tolerance in voltage divider resistor & ADC accuracy
+    if (cells.cellC_voltage != 2.5) {
+        cells.cellC_voltage *= 1.035;
+    }
+    // Calculate current based on average voltage
+    cells.cellC_current = (cells.cellC_voltage - 2.5) / sensitivity;
+		
+    // Print voltage on uart
+    char voltage_value[150];
+    sprintf(voltage_value, "Average voltage of cell A %f , cell B %f,cell C %f \t\n\r ", cells.cellA_voltage,cells.cellB_voltage,cells.cellC_voltage);
+    HAL_UART_Transmit(&huart2, (uint8_t*)voltage_value, sizeof(voltage_value), 300);
+
+    // Print current on uart
+    char current_value[150];
+    sprintf(current_value, "Average current of cell A %f , cell B %f,cell C %f \t\n\r ", cells.cellA_current,cells.cellB_current,cells.cellC_current);
+    HAL_UART_Transmit(&huart2, (uint8_t*)current_value, sizeof(current_value), 300);		
+    
+    return cells;		
 }
+
+
+
 
 /*
+
 //function to monitor NAOH tank level
 bool NAOH_tank_level()
 {
@@ -369,6 +466,26 @@ bool NAOH_tank_level()
 	return status;
 }
 */
+bool controlboard_power()
+{
+  //read the control board power on pin PC15
+	GPIO_PinState status =HAL_GPIO_ReadPin(GPIOC,GPIO_PIN_15);
+
+  //print the the salt tube bottom sensor on uart
+	if (status ==GPIO_PIN_SET)
+	{
+		  uint8_t tx_buffer[100]=" control board power is high \r\n"; 
+      HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
+	}
+	else
+	{
+		  uint8_t tx_buffer[100]=" control board power is low \r\n"; 
+      HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
+	}
+	return status;
+}
+
+
 
 // monitor salt tube bottom sensor
 bool salt_tube_bottom()
@@ -379,12 +496,12 @@ bool salt_tube_bottom()
   //print the the salt tube bottom sensor on uart
 	if (status ==GPIO_PIN_SET)
 	{
-		  uint8_t tx_buffer[100]=" salt tube bottom sensor is high \n\r"; 
+		  uint8_t tx_buffer[100]=" salt tube bottom sensor is high \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	else
 	{
-		  uint8_t tx_buffer[100]=" salt tube bottom sensor is low \n\r"; 
+		  uint8_t tx_buffer[100]=" salt tube bottom sensor is low \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	return status;
@@ -398,12 +515,12 @@ bool salt_tube_top()
   //print the the salt tube top sensor on uart
 	if (status ==GPIO_PIN_SET)
 	{
-		  uint8_t tx_buffer[100]=" salt tube top sensor is high \n\r"; 
+		  uint8_t tx_buffer[100]=" salt tube top sensor is high \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	else
 	{
-		  uint8_t tx_buffer[100]=" salt tube top sensor is low \n\r"; 
+		  uint8_t tx_buffer[100]=" salt tube top sensor is low \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	return status;
@@ -418,7 +535,7 @@ bool fill_salt_tube()
     static uint32_t fill_time_limit = 90;
     static uint32_t start_time_s, start_time_m;
     static bool filling_started = false;
-
+    static uint32_t elapsed_time=0;
     char tx_buffer[150];
     int n = sprintf(tx_buffer, "----In fill salt tube function--- start time is :%d:%d system time seconds are :%d\r\n", start_time_m, start_time_s, system_time.systemtime_s);
     HAL_UART_Transmit(&huart2, (uint8_t *)tx_buffer, sizeof(tx_buffer), 130);
@@ -434,11 +551,11 @@ bool fill_salt_tube()
         }
 
         HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_SET); // Start filling
-        uint8_t buff[100] = "Salt tube filling started";
+        uint8_t buff[100] = "Salt tube filling started \r\n";
         HAL_UART_Transmit(&huart2, buff, sizeof(buff), 120);
 
         // Calculate elapsed time in seconds
-        uint32_t elapsed_time = (system_time.systemtime_m * 60 + system_time.systemtime_s) - (start_time_m * 60 + start_time_s);
+        elapsed_time = (system_time.systemtime_m * 60 + system_time.systemtime_s) - (start_time_m * 60 + start_time_s);
         n = sprintf(tx_buffer, "elapsed time is :%d\r\n", elapsed_time);
         //HAL_UART_Transmit(&huart2, (uint8_t *)tx_buffer, sizeof(tx_buffer), 150);
 
@@ -452,8 +569,9 @@ bool fill_salt_tube()
         }
         else if (elapsed_time > fill_time_limit)
         {
-            uint8_t buffer[100] = "-----Salt tube not filled in 90 seconds------";
+            uint8_t buffer[100] = "-----Salt tube not filled in 90 seconds------\r\n";
             HAL_UART_Transmit(&huart2, buffer, sizeof(buffer), 100);
+					  //elapsed_time=0;
         }
     }
 
@@ -461,7 +579,7 @@ bool fill_salt_tube()
     if (salt_tube_bottom() && salt_tube_top())
     {
         HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET); // Stop filling
-        uint8_t buff[100] = "Salt tube filling stopped";
+        uint8_t buff[100] = "Salt tube filling stopped \r\n";
         //HAL_UART_Transmit(&huart2, buff, sizeof(buff), 50);
         filling_started = false;
         return false;
@@ -482,12 +600,12 @@ bool HOCL_tank_level()
   //print the tank level on uart
 	if (status ==GPIO_PIN_SET)
 	{
-		  uint8_t tx_buffer[100]=" HOCL_tank_level is high \n\r"; 
+		  uint8_t tx_buffer[100]=" HOCL_tank_level is high \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	else
 	{
-		  uint8_t tx_buffer[100]=" HOCL_tank_level is low \n\r"; 
+		  uint8_t tx_buffer[100]=" HOCL_tank_level is low \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	return status;
@@ -502,12 +620,12 @@ bool monitor_pressure()
   //print the pressure status on uart
 		if (status ==GPIO_PIN_SET)
 	{
-		  uint8_t tx_buffer[100]=" pressure is high \n\r"; 
+		  uint8_t tx_buffer[100]=" pressure is high \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	else
 	{
-		  uint8_t tx_buffer[100]=" pressure is low \n\r"; 
+		  uint8_t tx_buffer[100]=" pressure is low \r\n"; 
       HAL_UART_Transmit(&huart2, tx_buffer, sizeof(tx_buffer), 100);
 	}
 	return status;
@@ -558,13 +676,13 @@ void pH_NAOH_initialization()
 	//for NAOH ph sensor
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X65,1,100)==HAL_OK)
 	{
-  uint8_t tx_buffer[100]="Communication started on I2C with pH NAOH sensor\n\r"; 
+  uint8_t tx_buffer[100]="Communication started on I2C with pH NAOH sensor\r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 
 }
 	else
 	{
-	  uint8_t tx_buffer[100]="Error in Communicating with pH NAOH sensor on I2C \n\r"; 
+	  uint8_t tx_buffer[100]="Error in Communicating with pH NAOH sensor on I2C \r\n"; 
 	  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 	}
 	
@@ -576,13 +694,13 @@ void pH_HOCL_initialization()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X65,1,100)==HAL_OK)
 	{
-  uint8_t tx_buffer[100]="Communication started on I2C with pH HOCL sensor\n\r"; 
+  uint8_t tx_buffer[100]="Communication started on I2C with pH HOCL sensor\r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 	
 }
 	else
 	{
-	uint8_t tx_buffer[100]="Error in Communicating with pH HOCL sensor on I2C \n\r"; 
+	uint8_t tx_buffer[100]="Error in Communicating with pH HOCL sensor on I2C \r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 
 	}
@@ -592,13 +710,13 @@ void salttube_brineconductivity_initialization()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X65,1,100)==HAL_OK)
 	{
-  uint8_t tx_buffer[100]="Communication started on I2C with salt tube brine conductivity sensor\n\r"; 
+  uint8_t tx_buffer[100]="Communication started on I2C with salt tube brine conductivity sensor\r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 	
 }
 	else
 	{
-	uint8_t tx_buffer[100]="Error in Communicating with pH salt tube brine conductivity sensor on I2C \n\r"; 
+	uint8_t tx_buffer[100]="Error in Communicating with pH salt tube brine conductivity sensor on I2C \r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 
 	}
@@ -611,13 +729,13 @@ void measure_flow_NAOH()
 
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X01,1,100)==HAL_OK)
 	{
-  uint8_t tx_buffer[100]="Communication started on I2C with flowmeter NAOH sensor\n\r"; 
+  uint8_t tx_buffer[100]="Communication started on I2C with flowmeter NAOH sensor\r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 	
 }
 	else
 	{
-	uint8_t tx_buffer[100]="Error in Communicating with flowmeter NAOH sensor on I2C \n\r"; 
+	uint8_t tx_buffer[100]="Error in Communicating with flowmeter NAOH sensor on I2C \r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 
 	}
@@ -628,13 +746,13 @@ void measure_flow_HOCL()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X02,1,100)==HAL_OK)
 	{
-  uint8_t tx_buffer[100]="Communication started on I2C with flowmeter HOCL sensor\n\r"; 
+  uint8_t tx_buffer[100]="Communication started on I2C with flowmeter HOCL sensor\r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 	
 }
 	else
 	{
-	uint8_t tx_buffer[100]="Error in Communicating with flowmeter HOCL sensor on I2C \n\r"; 
+	uint8_t tx_buffer[100]="Error in Communicating with flowmeter HOCL sensor on I2C \r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 
 	}
@@ -645,13 +763,13 @@ void measure_flow_saltpump()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X03,1,100)==HAL_OK)
 	{
-  uint8_t tx_buffer[100]="Communication started on I2C with flowmeter saltpump sensor\n\r"; 
+  uint8_t tx_buffer[100]="Communication started on I2C with flowmeter saltpump sensor\r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 	
 }
 	else
 	{
-	uint8_t tx_buffer[100]="Error in Communicating with flowmeter saltpump sensor on I2C \n\r"; 
+	uint8_t tx_buffer[100]="Error in Communicating with flowmeter saltpump sensor on I2C \r\n"; 
   HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
 
 	}
@@ -780,17 +898,17 @@ void update_fault(fault_array_t *fault_array, fault_type_e fault_type, int *inde
 //function to scan connected devices on I2C 		
 void I2C_Scan()
 {
-char Buffer[25] = {0};
-uint8_t Space[] = " - ";
-uint8_t StartMSG[] = "Starting I2C Scanning: \r\n";
-uint8_t EndMSG[] = "Done! \r\n\r\n";
-uint8_t i = 0, ret;
+  char Buffer[25] = {0};
+  uint8_t Space[] = " - ";
+  uint8_t StartMSG[] = "Starting I2C Scanning: \r\n";
+  uint8_t EndMSG[] = "Done! \r\n";
+  uint8_t i = 0, ret;
 
 /*-[ I2C Bus Scanning ]-*/
 
-HAL_UART_Transmit(&huart2, StartMSG, sizeof(StartMSG), 10000);
-for(i=1; i<128; i++)
-{
+   HAL_UART_Transmit(&huart2, StartMSG, sizeof(StartMSG), 10000);
+   for(i=1; i<128; i++)
+   {
    ret = HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(i<<1), 3, 5);
    if (ret != HAL_OK) /* No ACK Received At That Address */
    {
@@ -809,7 +927,7 @@ for(i=1; i<128; i++)
 
 SystemTime time_conversion()
 {
-    // SystemTime time_converted
+    
     SystemTime time_converted;
     static uint32_t prev_ticks = 0;
     uint32_t current_ticks = HAL_GetTick();
@@ -832,10 +950,10 @@ SystemTime time_conversion()
     uint32_t elapsed_minutes = elapsed_seconds / 60;
     time_converted.systemtime_m = elapsed_minutes % 60;
     uint32_t elapsed_hours = elapsed_minutes / 60;
-    time_converted.systemtime_h = elapsed_hours % 24; // Assuming you want a 24-hour format
+    time_converted.systemtime_h = elapsed_hours % 24; // 24-hour format
 
     char time_converted_buffer[150];
-    snprintf(time_converted_buffer, sizeof(time_converted_buffer), "time converted is : %02d:%02d:%02d:%03d\r\n",
+    snprintf(time_converted_buffer, sizeof(time_converted_buffer), "time converted is : %02d:%02d:%02d:%03d \r\n",
              time_converted.systemtime_h, time_converted.systemtime_m,
              time_converted.systemtime_s, time_converted.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)time_converted_buffer, strlen(time_converted_buffer), 100);
@@ -927,7 +1045,7 @@ void write_systemtime_in_flashmemory()
 	  //get the current system time
 	  SystemTime current_time=time_conversion();
     char system_time_buffer[150];
-    snprintf(system_time_buffer, sizeof(system_time_buffer), " --- current system time: %02d:%02d:%02d:%03d\r\n",
+    snprintf(system_time_buffer, sizeof(system_time_buffer), " --- current system time: %02d:%02d:%02d:%03d \r\n",
              system_time.systemtime_h, system_time.systemtime_m,
              system_time.systemtime_s, system_time.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)system_time_buffer, strlen(system_time_buffer), 100);
@@ -935,7 +1053,7 @@ void write_systemtime_in_flashmemory()
     // Calculate total seconds for current system time
 	  total_seconds_current = system_time.systemtime_h * 3600 + system_time.systemtime_m * 60 + system_time.systemtime_s;
 		char total_seconds_current_buffer[150];
-		snprintf(total_seconds_current_buffer, sizeof(total_seconds_current_buffer), "--- Total seconds current system time: %u\r\n", total_seconds_current);
+		snprintf(total_seconds_current_buffer, sizeof(total_seconds_current_buffer), "--- Total seconds current system time: %u \r\n", total_seconds_current);
 		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_current_buffer, strlen(total_seconds_current_buffer), 100);
 
     // Add the seconds
@@ -952,7 +1070,7 @@ void write_systemtime_in_flashmemory()
 
     char total_system_time_buffer[150];
     snprintf(total_system_time_buffer, sizeof(total_system_time_buffer), 
-             "!!!!! System Time received from flash: %02d:%02d:%02d:%03d\r\n",
+             "!!!!! total system time calculated is : %02d:%02d:%02d:%03d \r\n",
              total_system_time.systemtime_h, total_system_time.systemtime_m,
              total_system_time.systemtime_s,total_system_time.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)total_system_time_buffer, strlen(total_system_time_buffer), 100);		
@@ -968,7 +1086,7 @@ void write_systemtime_in_flashmemory()
     write_to_flash(system_hours_address, sytemtime_byte_array, size_of_system_structure, FLASH_TYPEPROGRAM_BYTE);
 
     char buffer[150];
-    snprintf(buffer, sizeof(buffer), "System Time written on flash: %02d:%02d:%02d:%03d\r\n",
+    snprintf(buffer, sizeof(buffer), "System Time written on flash: %02d:%02d:%02d:%03d \r\n",
              total_system_time.systemtime_h, total_system_time.systemtime_m,
              total_system_time.systemtime_s, total_system_time.ticks);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
@@ -983,62 +1101,95 @@ TotalCycleTime read_total_cycle_time_in_flashmemory()
 	  TotalCycleTime read_totalcycle_time= *(TotalCycleTime*)total_cycle_time_address; // Read SystemTime from flash memory
 	  char buffer[100];
 	 // Format and transmit system time
-    snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d\r\n",
-             read_totalcycle_time.totalcycletime_h, read_totalcycle_time.totalcycletime_m,
-             read_totalcycle_time.totalcycletime_s);
+    snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d \r\n",
+             read_totalcycle_time.cycletime_h, read_totalcycle_time.cycletime_m,
+             read_totalcycle_time.cycletime_s);
     HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
     return read_totalcycle_time;
 	}	
 	
+//write total cycle hours to flash memory
 void write_total_cycle_time_in_flashmemory()
 {
     const uint32_t total_cycle_hours_address = 0x08010000;
 	  static SystemTime start_time, end_time; 
-	  
+    uint32_t size_of_totalcycle_structure = sizeof(TotalCycleTime);
+    uint8_t totalcycletime_byte_array[size_of_totalcycle_structure];
+	  static bool read_time=false;
+	  static uint32_t total_seconds_flash=0;
+	  static uint32_t total_seconds=0;
+    static uint32_t total_seconds_current=0;	  
 	  //read total cycle hours from flash memory
-	  TotalCycleTime totalcycle_time_fromflash=read_total_cycle_time_in_flashmemory();
+	  TotalCycleTime totalcycle_time_fromflash;
 
-	 //update the total cycle hours
-	 //start counting the total cycle hours when production flag is high and stop updating time when production flag is low
-	   
-    if (Production && (start_time.systemtime_h == 0 && start_time.systemtime_m == 0 && start_time.systemtime_s == 0)) {
-	   start_time = system_time;
-	  }
-	
-    if (!Production && (start_time.systemtime_h != 0 || start_time.systemtime_m != 0 || start_time.systemtime_s != 0)) {
-        end_time = system_time;		
-	 
-			
-		total_cycle_time.totalcycletime_h=(end_time.systemtime_h-start_time.systemtime_h)     + totalcycle_time_fromflash.totalcycletime_h ;
-		total_cycle_time.totalcycletime_m=(end_time.systemtime_m-start_time.systemtime_m)     + totalcycle_time_fromflash.totalcycletime_m;
-	  total_cycle_time.totalcycletime_s=(end_time.systemtime_s-start_time.systemtime_s)     + totalcycle_time_fromflash.totalcycletime_s;
-   // total_cycle_time.totalcycletime_ms=(end_time.systemtime_ms-start_time.systemtime_ms)  + totalcycle_time_fromflash.totalcycletime_ms;
-    
-			
-    uint32_t size_of_totalcycle_structure = sizeof(total_cycle_time);
-    uint8_t totalcycle_byte_array[size_of_totalcycle_structure];    
-	  memcpy(totalcycle_byte_array, &total_cycle_time, size_of_totalcycle_structure);
+	  if (!read_time)
+		{
+		totalcycle_time_fromflash = read_total_cycle_time_in_flashmemory();	
+    char read_cycle_time_fromflash_buffer[150];
+    snprintf(read_cycle_time_fromflash_buffer, sizeof(read_cycle_time_fromflash_buffer), 
+             "!!!!! total Cycle Time received from flash: %02d:%02d:%02d\r\n",
+             totalcycle_time_fromflash.cycletime_h, totalcycle_time_fromflash.cycletime_m,
+             totalcycle_time_fromflash.cycletime_s);
+    HAL_UART_Transmit(&huart2, (uint8_t*)read_cycle_time_fromflash_buffer, strlen(read_cycle_time_fromflash_buffer), 100);			
+	  
+		// Convert system times to seconds
+		total_seconds_flash = totalcycle_time_fromflash.cycletime_h * 3600 + totalcycle_time_fromflash.cycletime_m * 60 + totalcycle_time_fromflash.cycletime_s;
+		char total_seconds_flash_buffer[150];
+		snprintf(total_seconds_flash_buffer, sizeof(total_seconds_flash_buffer), "!!!!! Total seconds flash totalcycle time: %u\r\n", total_seconds_flash);
+		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_flash_buffer, strlen(total_seconds_flash_buffer), 100) ; 		
+		read_time=true;
+		}	
 
+    //print the current cycle hours 
+    char current_cycle_time_buffer[150];
+    snprintf(current_cycle_time_buffer, sizeof(current_cycle_time_buffer), " --- current cycle time: %02d:%02d:%02d \r\n",
+             current_cycle_time.cycletime_h, current_cycle_time.cycletime_m,
+             current_cycle_time.cycletime_s);
+    HAL_UART_Transmit(&huart2, (uint8_t*)current_cycle_time_buffer, strlen(current_cycle_time_buffer), 100);
+
+    // Calculate total seconds for current cycle time
+	  total_seconds_current = current_cycle_time.cycletime_h * 3600 + current_cycle_time.cycletime_m * 60 + current_cycle_time.cycletime_s;
+		char total_seconds_current_buffer[150];
+		snprintf(total_seconds_current_buffer, sizeof(total_seconds_current_buffer), "--- Total seconds current systecycle time: %u \r\n", total_seconds_current);
+		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_current_buffer, strlen(total_seconds_current_buffer), 100);
+
+    // Add the seconds
+    total_seconds = total_seconds_flash + total_seconds_current;
+		char total_seconds_buffer[150];
+		snprintf(total_seconds_buffer, sizeof(total_seconds_buffer), "--- Total seconds total cycle time: %u\r\n", total_seconds);
+		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_buffer, strlen(total_seconds_buffer), 100);  
+
+    // Convert back to hours, minutes, and seconds
+     total_cycle_time.cycletime_h= total_seconds / 3600;
+     total_seconds %= 3600;
+     total_cycle_time.cycletime_m = total_seconds / 60;
+     total_cycle_time.cycletime_s = total_seconds % 60;
+
+    char total_cycle_time_buffer[150];
+    snprintf(total_cycle_time_buffer, sizeof(total_cycle_time_buffer), 
+             "!!!!! Total cycle time calculated is : %02d:%02d:%02d \r\n",
+             total_cycle_time.cycletime_h, total_cycle_time.cycletime_m,
+             total_system_time.systemtime_s);
+    HAL_UART_Transmit(&huart2, (uint8_t*)total_cycle_time_buffer, strlen(total_cycle_time_buffer), 100);
+
+    // Convert systemtime structure into the byte array
+    memcpy(totalcycletime_byte_array, &total_cycle_time, size_of_totalcycle_structure);
 
     // Erase the flash memory before writing
-    erase_flash_memory(4, FLASH_VOLTAGE_RANGE_3); // Adjust the erase function parameters as necessary
+    erase_flash_memory(4, FLASH_VOLTAGE_RANGE_3); 
 
     // Write the byte array to flash memory
-   //	Program a word (32-bit) at a specified address
-    write_to_flash(total_cycle_hours_address,totalcycle_byte_array,size_of_totalcycle_structure,FLASH_TYPEPROGRAM_BYTE);
-	 //write_to_flash(fault_log_address, data, sizeof(my_faults),FLASH_TYPEPROGRAM_BYTE);
-	 
-	 
-	  char buffer[100];
-    snprintf(buffer, sizeof(buffer), "Total Cycle Time written: %02d:%02d:%02d\r\n",
-                 total_cycle_time.totalcycletime_h, total_cycle_time.totalcycletime_m, 
-                 total_cycle_time.totalcycletime_s);
-    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
-	  
-		// Reset start_time for next cycle
-    memset(&start_time, 0, sizeof(start_time));
-} 
+    write_to_flash(total_cycle_hours_address, totalcycletime_byte_array, size_of_totalcycle_structure, FLASH_TYPEPROGRAM_BYTE);
 
+    char buffer[150];
+    snprintf(buffer, sizeof(buffer), "Total cycle Time written on flash: %02d:%02d:%02d \r\n",
+             total_cycle_time.cycletime_h, total_cycle_time.cycletime_m,
+             total_cycle_time.cycletime_s);
+    HAL_UART_Transmit(&huart2, (uint8_t*)buffer, strlen(buffer), 100);
+
+    // Reset start_time and end_time for next cycle
+    memset(&start_time, 0, sizeof(start_time));
+    memset(&end_time, 0, sizeof(end_time));
 }
 
 // continously check if the current value is greater than 0 for 5 seconds then raise fault
@@ -1046,9 +1197,11 @@ bool cell_current_greater_than_zero() {
 	  
     static uint8_t startTime = 0; //variable to hold the start time
     uint32_t threshold = 5; // 5 seconds
+	  //uint32_t cell_current=0;
+	  Measurements cell=measure_current();
 	  
-    char tx_buff[60];	
-    if (cell_current > 0) {
+  	char tx_buff[60];	
+    if (cell.cell_current > 0 && Idel) {
         if (startTime == 0) {
             
             startTime = system_time.systemtime_s ;
@@ -1060,7 +1213,7 @@ bool cell_current_greater_than_zero() {
 				else if (system_time.systemtime_s - startTime > threshold) {
 					
             // cell_current has been greater than zero for more than 5 seconds
-            char buffer[120]=("Current greater than zero for more than 5 seconds\n");
+            char buffer[120]=("Current greater than zero for more than 5 seconds \r\n");
 					  HAL_UART_Transmit(&huart2,(uint8_t *)buffer,sizeof(buffer),100);
             HAL_GPIO_WritePin(GPIOC,GPIO_PIN_13,GPIO_PIN_RESET);
             // Reset startTime
@@ -1079,16 +1232,33 @@ bool cell_current_greater_than_zero() {
 		return 0;
 }
 
-bool monitor_salttube_brine_conductivity()
+//function to monitor the cell voltage
+bool monitor_cell_voltage()	
 {
+	
+ Measurements cell;
+ const uint32_t threshold_voltage=2;
+ if (cell.cell_voltage> threshold_voltage && Idel)
+ {
+ uint8_t buffer[150]="cell voltage is greater than 2V \r\n";
+ HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
+ return true;
+ }
+return false;
+}
 
 
-
-
-
-
-
-
+// function to monitor the brine conductivity value
+bool monitor_salttube_brine_conductivity(float brine_conditivity_value)
+{
+   const float threshold = 15.6;
+	 if (brine_conditivity_value < threshold)
+	 {
+	 uint8_t buffer[100]="value of brine_conditivity is less than threshold \r\n";
+	 HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),125);
+	 return true;
+	 } 
+	 
 return false;
 }
 
@@ -1098,9 +1268,47 @@ bool salt_tube_filled_time()
 return false;
 }
 
+//function to check if the ph value of HOCL is between 4.5 and 6.5
+bool monitor_ph_HOCL(float ph_HOCL)
+{
+    if (4.5 < ph_HOCL && ph_HOCL < 6.5)
+    {
+        char buffer[100];
+        snprintf(buffer, sizeof(buffer), "The pH value of HOCL is between 4.5 and 6.5 \r\n");
+        HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), 100);
+        return true;
+    }
+    return false;
+}
+
+//function to check if the ph value of NAOH is between 4.5 and 6.5
+bool monitor_ph_NAOH(float ph_NAOH)
+{
+    if (11.5 < ph_NAOH && ph_NAOH < 13)
+    {
+        char buffer[100];
+        snprintf(buffer, sizeof(buffer), "The pH value of NaOH is between 11.5 and 13 \r\n");
+        HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), 100);
+        return true;
+    }
+    return false;
+}
+
+//function to monitor the flow 
+bool monitor_flow(float flow_value) {
+    // Check if flow_value is greater than 0
+    if (flow_value > 0 && Idel) {
+			  uint8_t buffer[50]="The flow value is greater than 0 cc /10 seconds \r\n";
+        return true;
+    } else {
+        return false;
+    }
+}
+
+
 
 //fucntion to check low pressure for 2 hours
-bool low_pressure_check() {
+bool monitor_low_pressure() {
     static uint32_t start_time_h = 0, start_time_m = 0;
     const  uint32_t threshold_seconds = 2 * 3600; // 2 hours in seconds (2*60*60)
 	  static uint32_t start_time_seconds=0;
@@ -1120,7 +1328,7 @@ bool low_pressure_check() {
          elapsed_time_seconds = current_time_seconds - start_time_seconds;
 
         if (elapsed_time_seconds >= threshold_seconds) {
-            char buffer[120] = "Pressure is low for more than 2 hours\n";
+            char buffer[120] = "Pressure is low for more than 2 hours \r\n";
             HAL_UART_Transmit(&huart2, (uint8_t *)buffer, sizeof(buffer), 100);
             //HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
             // Reset start time
@@ -1165,7 +1373,7 @@ void idle_state()
 	
 	//for tank fill timeexceed
 	static bool Tankfill_time=false;
-	static bool Tank_fill_timer_expired=false;
+	
 	static bool Tankfill_timeexceed=false;
 	static uint32_t Tankfill_timeexceed_counter=0;
 	static bool Tankfill_time_trend_correctpasscode=false;
@@ -1186,14 +1394,14 @@ void idle_state()
 
 	static bool prev_Tankfill_time=false,prev_Tankfill_timeexceed=false;
 	
-	uint8_t current_value=0;
-  current_value=cell_current();
+	uint32_t current_value=0;
+  Measurements cell = measure_current();
 	
-	if (current_value==0)
+	if (cell.cell_current==0)
 	{
 	
 	//system ready 
-  if(Stop_signal && !Production && !Masterflag)
+  if(Stop_signal && !Production && !MasterFault)
 	{
 	Idel_systemready_state=true;	
 	Idel_tanksfull_state=false;
@@ -1277,7 +1485,7 @@ if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
     if (Tankfill_timeexceed_timestamps[0] - Tankfill_timeexceed_timestamps[3 - 1] <= 2880) {
        //printf("Tank fill time exceeded 3 times in 48 hours\n");
 			
-			Tankfill_timetrend_code=system_time.systemtime_h-total_cycle_time.totalcycletime_h;
+			Tankfill_timetrend_code=system_time.systemtime_h-total_cycle_time.cycletime_h;
 			Tankfill_timetrend_passcode=Tankfill_timetrend_code+177;
 			Tankfill_timeexceed_counter=0;
 
@@ -1293,14 +1501,110 @@ if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
 	
 }
 }
+
+
+void production_state()
+{
+   Production=false;
+	//variable for the salttube start time
+	 SystemTime current_time=time_conversion();
+	 static uint32_t salttube_start_time=0;
+	 static uint32_t priming_start_time=0;
+	 priming_start_time = current_time.systemtime_s;
+   Priming_sequence=true;
+	 const uint32_t Priming_sequence_timer=4;
+
+	
+	 uint32_t HOCL_current_production_duration_m=0;
+	 uint32_t HOCL_solution_production=0;
+	 uint32_t NAOH_current_production_duration_m=0;
+	 uint32_t NAOH_solution_production=0;
+	
+	 
+	 
+	 
+	 //salttube_start_time=current_time.systemtime_s;
+	 //Priming_sequence=true;
+	
+ 	 // Priming conditions  for 4 seconds
+	 //In Priming state 
+    if (Priming_sequence)
+		{
+	  if (current_time.systemtime_s - priming_start_time <= Priming_sequence_timer )
+		{
+
+		  CellsMeasurement cells_reference = measure_cells_current_voltages();
+			Measurements cell_reference = measure_current();
+			//turning on the salt pump 
+			HAL_GPIO_WritePin(GPIOA,GPIO_PIN_6,GPIO_PIN_SET);
+			//turning on the cell fill solenoid 
+		  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_13,GPIO_PIN_SET);
+			//turn on the Salt pump control signal ON
+						
+			//turn on the salt tube for 2 seconds
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_SET); // Start filling
+			salttube_start_time=current_time.systemtime_s;
+		
+    if (((current_time.systemtime_s - salttube_start_time) >= 2))
+    {
+        // Turn off the salt tube
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET);
+    }
+
+	}
+
+		
+}
+		
+ if (Production_productionON)
+ {
+  monitor_low_pressure();
+	//monitor ph naoh,hocl 
+	//monitor naoh,hocl,salt pump flows
+	 
+	//start counting cycle hours.
+	current_cycle_time.cycletime_h=system_time.systemtime_h - start_time.systemtime_h;
+	current_cycle_time.cycletime_m=system_time.systemtime_m - start_time.systemtime_m;
+  current_cycle_time.cycletime_s=system_time.systemtime_s - start_time.systemtime_s;
+  
+	//writing cycle hours to flash memory
+  //write_total_cycle_time_in_flashmemory();
+	 
+	//turn on the main cell signal ON
+  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_14,GPIO_PIN_SET);
+	 
+	if (!HOCL_tank_level())
+	{
+	HOCL_cycle_time.cycletime_h=system_time.systemtime_h - start_time.systemtime_h;
+	HOCL_cycle_time.cycletime_m=system_time.systemtime_m - start_time.systemtime_m;
+  HOCL_cycle_time.cycletime_s=system_time.systemtime_s - start_time.systemtime_s;
+	HOCL_current_production_duration_m=HOCL_cycle_time.cycletime_m;
+
+
+	//calculate the HOCL solution production calculation
+		
+	}
+
+	if (!NAOH_tank_level())
+	{
+	NAOH_cycle_time.cycletime_h=system_time.systemtime_h - start_time.systemtime_h;
+	NAOH_cycle_time.cycletime_m=system_time.systemtime_m - start_time.systemtime_m;
+  NAOH_cycle_time.cycletime_s=system_time.systemtime_s - start_time.systemtime_s;
+	NAOH_current_production_duration_m=HOCL_cycle_time.cycletime_m;
+		
+	//calculate the NAOH solution production calculation
+	//monitor HOCL,NAOH and Saltpump flows
+  //monitor PH of NAOH and HOCL		
+	}
+	 
+ }
 		
 		
 		
-
-
-
-
-
+		
+		
+}	
+		
 
 
 /* USER CODE END 0 */
@@ -1347,11 +1651,12 @@ int main(void)
 	I2C_Scan();
   
 	
-	SystemTime start_time;
+	
 	start_time=time_conversion();
+	
   //erase_flash_memory(5, FLASH_VOLTAGE_RANGE_3);
   //write_systemtime_in_flashmemory();
-
+	
   //testing for fault
   fault_circuit_board.counter = 1;
   fault_circuit_board.cycle_hours = total_cycle_hours;
@@ -1364,9 +1669,6 @@ int main(void)
   //calculate the cycle hours
 	
 		
-		
-    
-
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1374,63 +1676,97 @@ int main(void)
   while (1)
   { 
 
-	 Production=true;
-   currentTime=system_time.systemtime_s;	 
-		//write_systemtime_in_flashmemory();
+	// Production=true;
+   currentTime=system_time.systemtime_s;
+	 system_time=time_conversion();	
+
+	//	NAOH_tank_level();
+		//HOCL_tank_level();
+		//salt_tube_bottom();
+	//	salt_tube_top();
+	//	fill_salt_tube();
+		//cell_current_greater_than_zero();
+
 		
 	 //update the system_time structure instance
-	 system_time=time_conversion();
 	 
-	 if (Production)
-	 {
-	  cycle_time.totalcycletime_h=system_time.systemtime_h - start_time.systemtime_h;
-	  cycle_time.totalcycletime_m=system_time.systemtime_m - start_time.systemtime_m;
-    cycle_time.totalcycletime_s=system_time.systemtime_s - start_time.systemtime_s;
-	  
+		
+	// if (Production)
+	// {
+		 
+//cycle_time.totalcycletime_h=system_time.systemtime_h - start_time.systemtime_h;
+	//  cycle_time.totalcycletime_m=system_time.systemtime_m - start_time.systemtime_m;
+  //  cycle_time.totalcycletime_s=system_time.systemtime_s - start_time.systemtime_s;
 
-	 }
+	// }
+		
 	 
+		
+		
+		
+		
    //write the system hours in flashmemory after every 1 minute
-	if ((currentTime - lastSaveTime) >= 6) //write after 1 minute
+	 
+	if ((currentTime - lastSaveTime) >= 10) //write after 1 minute
     { 
-			  uint8_t buffer[150]=" !!!! writing time into flash memory";
+			  uint8_t buffer[150]=" !!!! writing time into flash memory \r\n";
 			  HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
         write_systemtime_in_flashmemory();
         lastSaveTime = currentTime; // Update the last save time
-    }
+		}
+			
+   //sprintf(tickStr, "HAL_Tick: %d\n\r", HAL_GetTick());
+   // HAL_UART_Transmit(&huart2, (uint8_t *)tickStr, sizeof(tickStr), 280);
+		
+		
+		
+		
+		
+		/*
+		if (!Start_signal && !Production && !MasterFault)	
+		{
+			
+    	uint8_t buff[50]="---------In  condtion-------";
+			HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
 	 
-		
-		
-
-
 		//read_sys_cycle_hours_in_flashmemory();
 		measure_current();
-		HAL_GetTick();
+		//HAL_GetTick();
 		salt_pump();
     drain_solenoid();
-		NAOH_tank_level();
-		HOCL_tank_level();
-		salt_tube_bottom();
-		salt_tube_top();
-		fill_salt_tube();
-		cell_current_greater_than_zero();
-    //sprintf(tickStr, "HAL_Tick: %d\n\r", HAL_GetTick());
-   // HAL_UART_Transmit(&huart2, (uint8_t *)tickStr, sizeof(tickStr), 280);
-    counter++;
-		
-		if (!Start_signal)	
-		{
 		idle_state();
+	  Idel=true;
+		
+			
+		//function to check the faults all functions will return the bool value
+    monitor_cell_voltage();
+    monitor_flow(flow);
+    monitor_low_pressure();
+    monitor_ph_HOCL(ph_HOCL_value);
+    monitor_ph_NAOH(ph_NAOH_value);
+    monitor_salttube_brine_conductivity(brine_conc_value);	
+			
 		}
 		
 		
-		if (Start_signal && !Idel_systemready_state && !Idel_tanksfull_state && !Idel_tankfill_timeexceeded_state && !Idel_lowpressure_state)
+		
+		// move to production if their is start signal and all the idle state flags are not high
+		if (Start_signal && !Idel_systemready_state && !Idel_tanksfull_state && !Idel_tankfill_timeexceeded_state && !Idel_lowpressure_state && !MasterFault && !Production)
 		{
-
+				  uint8_t buff[50]="---------In production condtion-------";
+			HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
 		}
 		
 		
+		//if any of the fault is detected move to the fault state
+
+		if(cell_voltage_fault || flow_fault || low_pressure_fault || ph_HOCL_fault || ph_NAOH_fault || brine_conductivity || no_board_power_fault )
+		{
+		  uint8_t buff[50]="---------In fault condtion-------";
+			HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
+		}
 		
+		 */
 
 
 	
