@@ -117,30 +117,6 @@ typedef struct
  float cellC_current;
 } CellsMeasurement;
 
-
-
-/*
-typedef struct {
-    uint32_t system_hours;
-    uint32_t system_minutes;
-	  uint32_t total_cycle_hours;
-	  uint32_t total_cycle_mins;
-} TimeComponents;
-
-
-//current_time structure
-
-typedef struct{
-    uint64_t currenttime_ms;
-    uint64_t currenttime_s;
-	  uint64_t currenttime_m;
-	  uint64_t currenttime_h;
-
-} CurrentTime;
-*/
-
-
-
 //system hours structure
 typedef struct{
     uint32_t systemtime_s;
@@ -162,21 +138,8 @@ typedef struct{
 
 TotalCycleTime total_cycle_time,current_cycle_time,HOCL_cycle_time,NAOH_cycle_time;
 
-
-//for faults
-	struct Fault_logs
-{
- uint32_t counter;
- uint32_t	total_cycle_hours;
- bool fault_status;
- uint32_t system_hours;
- uint32_t real_time_clock; 	
-} f1;
-
 typedef enum {
-    FAULT_TYPE_CKT_B,
-    FAULT_TYPE_UNDR_CNT,
-    FAULT_TYPE_CKT_A,
+    FAULT_TYPE_CKT_BOARD,
     FAULT_TYPE_UNDER_CURRENT,
     FAULT_TYPE_OVER_CURRENT,
     FAULT_TYPE_SALTTUBE_LEVEL,
@@ -192,10 +155,10 @@ typedef enum {
 
 typedef struct {
  uint32_t counter;
- uint32_t	cycle_hours;
+ TotalCycleTime	cycle_hours;
  bool fault_status;
- uint32_t system_hours;
- uint32_t real_time_clock; 
+ SystemTime system_hours;
+ RTC_DateTypeDef real_time_clock; 
 	  
 }__attribute__((packed)) fault_t;
 
@@ -206,10 +169,10 @@ typedef struct {
 // Initialize my_faults
 fault_array_t my_faults;
 
-fault_t fault_circuit_board,fault_under_current,fault_over_current;
-fault_t fault_salt_tube_level,fault_pressure_loss;
-fault_t fault_salt_pump_hocl_flowrate,fault_salt_pump_naoh_flowrate;
-fault_t fault_ph_hocl,fault_ph_naoh,fault_brine_conductivity;
+// fault_t fault_circuit_board,fault_under_current,fault_over_current;
+// fault_t fault_salt_tube_level,fault_pressure_loss,fault_cell_control;
+// fault_t fault_salt_pump_hocl_flowrate,fault_salt_pump_naoh_flowrate;
+// fault_t fault_ph_hocl,fault_ph_naoh,fault_brine_conductivity;
 
 //counter for each fault type
 int fault_circuit_board_count=0;
@@ -223,6 +186,19 @@ int fault_ph_hocl_count=0;
 int fault_ph_naoh_count=0;
 int fault_brine_conductivity_count=0;
 int fault_cellcontrol_count=0;
+
+//flags for each fault type
+bool fault_circuit_board_status=false;
+bool fault_under_current_status=false;
+bool fault_over_current_status=false;
+bool fault_salt_tube_level_status=false;
+bool fault_pressure_loss_status=false;
+bool fault_salt_pump_hocl_flowrate_status=false;
+bool fault_salt_pump_naoh_flowrate_status=false;
+bool fault_ph_hocl_status=false;
+bool fault_ph_naoh_status=false;
+bool fault_brine_conductivity_status=false;
+bool fault_cellcontrol_status=false;
 
 
 
@@ -241,20 +217,20 @@ bool Resume_signal=false;
 bool Production=false;
 
 
-//flags for each state in idel
-bool Idel =false;
-bool Idel_systemready_state=false;
-bool Idel_tanksfull_state=false;
-bool Idel_tankfill_timeexceeded_state=false;
-bool Idel_lowpressure_state=false;
+//flags for each state in Idle
+bool Idle =false;
+bool Idle_systemready_state=false;
+bool Idle_tanksfull_state=false;
+bool Idle_tankfill_timeexceeded_state=false;
+bool Idle_lowpressure_state=false;
 
 
 //flags for production state
 bool Priming_sequence=false;
 bool Production_productionON=false;
-bool Flusing_sequence=false;
+bool Flushing_sequence=false;
 bool Tank_fill_timer_expired=false;
-//
+bool overcurrent=false,undercurrent=false,lowcurrent_trend=false;		
 
 
 
@@ -276,11 +252,6 @@ static void MX_USART1_UART_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-
-
-
-
-
 time_t getUnixTime(void)
 {
 		char Time[50];
@@ -289,7 +260,6 @@ time_t getUnixTime(void)
     HAL_RTC_GetTime(&hrtc, &sTime, RTC_FORMAT_BIN);
     HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
 	
-    
     timeinfo.tm_year = sDate.Year + 100; // Adjust for the year offset
     timeinfo.tm_mon =  sDate.Month - 1;   // Adjust for the month offset
     timeinfo.tm_mday = sDate.Date;
@@ -311,7 +281,7 @@ time_t getUnixTime(void)
 
 
 //calculate current and voltage
-Measurements measure_current(void) {
+Measurements measure_current_voltage(void) {
     uint16_t readvalue;
     const int num_samples = 10;
     float sum_readvalue = 0;
@@ -352,12 +322,146 @@ Measurements measure_current(void) {
     return main_cell;
 }
 
+
+bool compare_current_with_reference(float current_reference) {
+    float average_current = measure_current_voltage().cell_current;
+
+    if (average_current < current_reference * 0.8)
+
+		{ // Check if 20% below reference
+			  uint8_t buffer[100]="Current value is 20 percent below the reference value.\r\n" ;
+			  HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
+			  return true;
+    }
+		else 
+		{
+        uint8_t buffer[100]="Current value is within acceptable range.\r\n" ;
+			  HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
+   			printf("Current value is within acceptable range.\n");
+			  return false;
+    }
+		return false;
+}
+
+
+void current_below_threshold_for_duration()
+{
+  const uint32_t threshold_current_value=7;
+	const uint32_t time_threshold=10;
+	const int duration= 10;
+	float average_current = measure_current_voltage().cell_current;
+	static uint32_t start_time_m=0,start_time_s=0;
+	static uint32_t undercurrent_standby_counter=0;
+	static uint32_t elapsed_time=0;
+	const  uint32_t undercurrent_time_threshold=3600;
+	char buffer[100];
+	SystemTime under_current_standby_system_time;
+	TotalCycleTime under_current_standby_cycle_time;
+	
+	if (average_current<threshold_current_value)
+	{
+  
+	//turn off  the  cell fill solenoid 
+  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_13,GPIO_PIN_RESET);		
+		
+	if (start_time_m==0 && start_time_s==0)
+		{
+		start_time_m = system_time.systemtime_m;
+		start_time_s = system_time.systemtime_s;
+		sprintf(buffer, " ----start time of cell current <7 is %d------ \r\n", start_time_s);					  
+		HAL_UART_Transmit(&huart2,(uint8_t*)buffer,sizeof(buffer),160);
+    
+    //increment the under current counter
+		undercurrent_standby_counter++;
+		under_current_standby_system_time=system_time;
+		under_current_standby_cycle_time=current_cycle_time;
+		}
+		
+		//convert into seconds 
+	  elapsed_time = (system_time.systemtime_m * 60 + system_time.systemtime_s) - (start_time_m * 60 + start_time_s);
+	  
+	 if (undercurrent_standby_counter==5 && elapsed_time < undercurrent_time_threshold ) 
+	 {
+	 sprintf(buffer, "undercurrent counter value is 5 production off \r\n");
+   HAL_UART_Transmit(&huart2, (uint8_t *)buffer, sizeof(buffer), 100);
+	 undercurrent_standby_counter=0;
+	 elapsed_time=0;
+	 start_time_s = 0;
+	 start_time_m = 0;
+   undercurrent=true;		 
+	// move to undercurrent fault state
+	 
+	 }
+	 
+	 if (system_time.systemtime_s - start_time_s >= time_threshold) {
+		        sprintf(buffer, "Production off \r\n");
+            HAL_UART_Transmit(&huart2, (uint8_t *)buffer, sizeof(buffer), 100);
+		        undercurrent=true;		 
+            // Reset start_time_s and start_time_m
+            start_time_s = 0;
+		        start_time_m = 0;
+            elapsed_time=0;		 
+		        undercurrent_standby_counter=0;
+					  // move to undercurrent fault state
+                		 
+	}
+	 
+}	else
+	{
+	//turn on the cell fill solenoid 
+  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_13,GPIO_PIN_SET);	
+	}
+}
+
+
+void current_high_threshold_for_duration()
+{
+  const float threshold_current_value=17.0;
+	const uint32_t time_threshold=5;
+  float average_current = measure_current_voltage().cell_current;
+	static uint32_t start_time_m=0,start_time_s=0;
+	static uint32_t overcurrent_standby_counter=0;
+	static uint32_t elapsed_time=0;
+	char buffer[100];
+	SystemTime over_current_standby_system_time;
+	TotalCycleTime over_current_standby_cycle_time;
+	
+	if (average_current>threshold_current_value)
+	{
+	
+	if (start_time_m==0 && start_time_s==0)
+		{
+		start_time_m = system_time.systemtime_m;
+		start_time_s = system_time.systemtime_s;
+		sprintf(buffer, " ----start time of cell current >17 is %d------ \r\n", start_time_s);					  
+		HAL_UART_Transmit(&huart2,(uint8_t*)buffer,sizeof(buffer),160);
+    
+		}
+		//convert into seconds 
+	    elapsed_time = (system_time.systemtime_m * 60 + system_time.systemtime_s) - (start_time_m * 60 + start_time_s);
+        
+    if (elapsed_time> time_threshold)
+	 {
+	  sprintf(buffer, "overcurrent condition occurs \r\n");
+      HAL_UART_Transmit(&huart2, (uint8_t *)buffer, sizeof(buffer), 100);
+	   overcurrent_standby_counter++;
+		 overcurrent=true;
+	   elapsed_time=0;
+	   start_time_s = 0;
+	   start_time_m = 0;	 
+	// move to undercurrent fault state
+	 
+	 }	  
+}
+}
+
+
 CellsMeasurement measure_cells_current_voltages()
 {   
 	  // take the 10 samples for each each of the cell A ,B and C and calculate the current and voltages values. and update the structure
 	  CellsMeasurement cells;
     uint16_t readvalue;
-    const int num_samples = 10;
+    const int num_samples = 10;        
     uint16_t sum_readvalue = 0;
     float average_readvalue;
     const float sensitivity = 0.1;
@@ -407,8 +511,7 @@ CellsMeasurement measure_cells_current_voltages()
 		sum_readvalue=0;
 		average_readvalue=0;
 		
-		
-    // calculation for for Cell C
+    // calculation for Cell C
     // Take 10 samples of analog reading
     for (int i = 0; i < num_samples; i++) {
         HAL_ADC_PollForConversion(&hadc1, 1000);
@@ -466,6 +569,8 @@ bool NAOH_tank_level()
 	return status;
 }
 */
+
+
 bool controlboard_power()
 {
   //read the control board power on pin PC15
@@ -526,9 +631,6 @@ bool salt_tube_top()
 	return status;
 }
 
-
-
-
 //function to fill if the salt tube
 bool fill_salt_tube()
 {
@@ -582,6 +684,8 @@ bool fill_salt_tube()
         uint8_t buff[100] = "Salt tube filling stopped \r\n";
         //HAL_UART_Transmit(&huart2, buff, sizeof(buff), 50);
         filling_started = false;
+			  start_time_s=0;
+			  start_time_m=0;
         return false;
     }
 
@@ -653,7 +757,7 @@ void drain_solenoid()
     if (drain_solenoidState == 0)
     {
 
-      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_SET); // Turn on solenoid control pin
+      HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_SET); // Turn on solenoid control pin
       drain_solenoidState = 1;
 
       // Set the target time for 1 minute
@@ -664,12 +768,60 @@ void drain_solenoid()
   // Check if 1 minute have passed
   if (drain_solenoidState == 1 && HAL_GetTick() >= drain_solenoidTargetTime)
   {
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, GPIO_PIN_RESET); // Turn off solenoid control pin
+    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET); // Turn off solenoid control pin
     drain_solenoidState = 0;
     drain_solenoidTime = HAL_GetTick();
   }
 }
-   
+
+//function to start communication with HOCL flow controller   
+void HOCL_flow_controller_initialization()
+{
+	//for HOCL flow controller 
+  if(HAL_I2C_IsDeviceReady(&hi2c1,0X12,1,100)==HAL_OK)
+	{
+  uint8_t tx_buffer[100]="Communication started on I2C with HOCL_flow_controller \r\n"; 
+  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
+
+}
+	else
+	{
+	  uint8_t tx_buffer[100]="Error in Communicating with HOCL_flow_controller on I2C \r\n"; 
+	  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
+	}
+}
+
+//function to start communication with NAOH flow controller   
+void NAOH_flow_controller_initialization()
+{
+	//for NAOH flow controller 
+  if(HAL_I2C_IsDeviceReady(&hi2c1,0X12,1,100)==HAL_OK)
+	{
+  uint8_t tx_buffer[100]="Communication started on I2C with NAOH_flow_controller \r\n"; 
+  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
+
+}
+	else
+	{
+	  uint8_t tx_buffer[100]="Error in Communicating with NAOH_flow_controller on I2C \r\n"; 
+	  HAL_UART_Transmit(&huart2,tx_buffer,sizeof(tx_buffer),100);
+	}
+}
+
+void NAOH_flow_controller()
+{
+  // send data to the NAOH flow controller commad 
+
+
+
+}
+
+void HOCL_flow_controller()
+{
+  // send data to the HOCL flow controller commad 
+
+}
+
 //function to start I2C communication with ph sensor for NAOH on I2C
 void pH_NAOH_initialization()
 { 
@@ -706,6 +858,8 @@ void pH_HOCL_initialization()
 	}
 }
 
+
+
 void salttube_brineconductivity_initialization()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X65,1,100)==HAL_OK)
@@ -724,7 +878,7 @@ void salttube_brineconductivity_initialization()
 
 
 //function to start I2C communication with flowmeter NAOH on I2C
-void measure_flow_NAOH()
+void measure_flow_NAOH_initialization()
 {
 
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X01,1,100)==HAL_OK)
@@ -742,7 +896,7 @@ void measure_flow_NAOH()
 
 }
 //function to start I2C communication with flowmeter HOCL on I2C
-void measure_flow_HOCL()
+void measure_flow_HOCL_initialization()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X02,1,100)==HAL_OK)
 	{
@@ -759,7 +913,7 @@ void measure_flow_HOCL()
 
 }
 //function to start I2C communication with flowmeter saltpump on I2C
-void measure_flow_saltpump()
+void measure_flow_saltpump_initialization()
 {
   if(HAL_I2C_IsDeviceReady(&hi2c1,0X03,1,100)==HAL_OK)
 	{
@@ -809,7 +963,29 @@ void write_to_flash(uint32_t address, uint8_t *data, uint32_t size,uint32_t Type
     HAL_FLASH_Lock();
 }
 
+//function to check if the ph value of NAOH is between 4.5 and 6.5
+bool monitor_pH_NAOH(float ph_NAOH)
+{
+    if (11.5 < ph_NAOH && ph_NAOH < 13)
+    {
+        char buffer[100];
+        snprintf(buffer, sizeof(buffer), "The pH value of NaOH is between 11.5 and 13 \r\n");
+        HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), 100);
+        return true;
+    }
+    return false;
+}
 
+//function to monitor the flow 
+bool monitor_flow(float flow_value) {
+    // Check if flow_value is greater than 0
+    if (flow_value > 0 && Idle) {
+			  uint8_t buffer[50]="The flow value is greater than 0 cc /10 seconds \r\n";
+        return true;
+    } else {
+        return false;
+    }
+}
 
 
 //function to print temp fault array on uart
@@ -950,7 +1126,8 @@ SystemTime time_conversion()
     uint32_t elapsed_minutes = elapsed_seconds / 60;
     time_converted.systemtime_m = elapsed_minutes % 60;
     uint32_t elapsed_hours = elapsed_minutes / 60;
-    time_converted.systemtime_h = elapsed_hours % 24; // 24-hour format
+    // time_converted.systemtime_h = elapsed_hours % 24; // 24-hour format
+    time_converted.systemtime_h = elapsed_hours;
 
     char time_converted_buffer[150];
     snprintf(time_converted_buffer, sizeof(time_converted_buffer), "time converted is : %02d:%02d:%02d:%03d \r\n",
@@ -962,12 +1139,26 @@ SystemTime time_conversion()
 }
 
 // Function to check if the system time is valid
-bool isValidSystemTime(const SystemTime *systemTime) {
-    // Check for valid hours, minutes, seconds, and ticks
-    if (systemTime->systemtime_h >= 0 && systemTime->systemtime_h < 24 &&
+bool isvalid_system_time(const SystemTime *systemTime) {
+    // Check for valid hours, minutes, seconds
+	  //systemTime->systemtime_h < 24 &&
+    if (systemTime->systemtime_h >= 0 && 
         systemTime->systemtime_m >= 0 && systemTime->systemtime_m < 60 &&
-        systemTime->systemtime_s >= 0 && systemTime->systemtime_s < 60 &&
-        systemTime->ticks >= 0) {
+        systemTime->systemtime_s >= 0 && systemTime->systemtime_s < 60 ) 
+		{
+        return true; // Valid time
+    } else {
+        return false; // Invalid time
+    }
+}
+
+bool isvalid_totalcycle_time(const TotalCycleTime *cycletime) {
+	  // cycletime->cycletime_h < 24 &&
+    // Check for valid hours, minutes, seconds
+    if (cycletime->cycletime_h >= 0 && 
+        cycletime->cycletime_m >= 0 && cycletime->cycletime_m < 60 &&
+        cycletime->cycletime_s >= 0 && cycletime->cycletime_s < 60 )
+         {
         return true; // Valid time
     } else {
         return false; // Invalid time
@@ -978,20 +1169,23 @@ SystemTime read_systemtime_in_flashmemory()
     const uint32_t system_time_address = 0x08020000;
     SystemTime read_system_time;
 
-    if (isValidSystemTime((SystemTime*)system_time_address)) {
+    if (isvalid_system_time((SystemTime*)system_time_address)) {
         read_system_time = *(SystemTime*)system_time_address; // Read SystemTime from flash memory
 
         // Check for invalid time values
-        if (read_system_time.systemtime_h < 0 || read_system_time.systemtime_h > 23 ||
-            read_system_time.systemtime_m < 0 || read_system_time.systemtime_m > 59 ||
-            read_system_time.systemtime_s < 0 || read_system_time.systemtime_s > 59) {
+        if (read_system_time.systemtime_h < 0 || read_system_time.systemtime_m < 0 || read_system_time.systemtime_s < 0 )
+            
+        {
             // Initialize to 00:00:00.000 if any value is invalid
             read_system_time.systemtime_h = 0;
             read_system_time.systemtime_m = 0;
             read_system_time.systemtime_s = 0;
             read_system_time.ticks = 0;
         }
-    } else {
+    }
+    
+    
+    else {
         // Initialize to 00:00:00.000 if the system time in flash is not valid
         read_system_time.systemtime_h = 0;
         read_system_time.systemtime_m = 0;
@@ -1038,7 +1232,6 @@ void write_systemtime_in_flashmemory()
 		char total_seconds_flash_buffer[150];
 		snprintf(total_seconds_flash_buffer, sizeof(total_seconds_flash_buffer), "!!!!! Total seconds flash system time: %u\r\n", total_seconds_flash);
 		HAL_UART_Transmit(&huart2, (uint8_t*)total_seconds_flash_buffer, strlen(total_seconds_flash_buffer), 100) ; 		
-			
 		read_time=true;
 		}	
 			
@@ -1098,8 +1291,33 @@ TotalCycleTime read_total_cycle_time_in_flashmemory()
 {
     
     const uint32_t total_cycle_time_address = 0x08010000;
-	  TotalCycleTime read_totalcycle_time= *(TotalCycleTime*)total_cycle_time_address; // Read SystemTime from flash memory
-	  char buffer[100];
+	  TotalCycleTime read_totalcycle_time; 
+    
+    if (isvalid_totalcycle_time((TotalCycleTime*)total_cycle_time_address)) {
+        read_totalcycle_time = *(TotalCycleTime*)total_cycle_time_address; // Read SystemTime from flash memory
+
+        // Check for invalid time values
+        if (read_totalcycle_time.cycletime_h < 0 || read_totalcycle_time.cycletime_m < 0 || read_totalcycle_time.cycletime_s < 0 )
+            
+        {
+            // Initialize to 00:00:00.000 if any value is invalid
+            read_totalcycle_time.cycletime_h = 0;
+            read_totalcycle_time.cycletime_m = 0;
+            read_totalcycle_time.cycletime_s = 0;
+            //read_totalcycle_time.ticks = 0;
+        }
+    }
+    
+    
+    else {
+        // Initialize to 00:00:00.000 if the system time in flash is not valid
+        read_totalcycle_time.cycletime_h = 0;
+        read_totalcycle_time.cycletime_m = 0;
+        read_totalcycle_time.cycletime_s = 0;
+       // read_totalcycle_time.ticks = 0;
+    }
+    
+    char buffer[100];
 	 // Format and transmit system time
     snprintf(buffer, sizeof(buffer), "Totalcycle Time read: %02d:%02d:%02d \r\n",
              read_totalcycle_time.cycletime_h, read_totalcycle_time.cycletime_m,
@@ -1198,10 +1416,10 @@ bool cell_current_greater_than_zero() {
     static uint8_t startTime = 0; //variable to hold the start time
     uint32_t threshold = 5; // 5 seconds
 	  //uint32_t cell_current=0;
-	  Measurements cell=measure_current();
+	  Measurements cell=measure_current_voltage();
 	  
   	char tx_buff[60];	
-    if (cell.cell_current > 0 && Idel) {
+    if (cell.cell_current > 0 && Idle) {
         if (startTime == 0) {
             
             startTime = system_time.systemtime_s ;
@@ -1238,7 +1456,7 @@ bool monitor_cell_voltage()
 	
  Measurements cell;
  const uint32_t threshold_voltage=2;
- if (cell.cell_voltage> threshold_voltage && Idel)
+ if (cell.cell_voltage> threshold_voltage && Idle)
  {
  uint8_t buffer[150]="cell voltage is greater than 2V \r\n";
  HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
@@ -1269,7 +1487,7 @@ return false;
 }
 
 //function to check if the ph value of HOCL is between 4.5 and 6.5
-bool monitor_ph_HOCL(float ph_HOCL)
+bool monitor_pH_HOCL(float ph_HOCL)
 {
     if (4.5 < ph_HOCL && ph_HOCL < 6.5)
     {
@@ -1281,29 +1499,7 @@ bool monitor_ph_HOCL(float ph_HOCL)
     return false;
 }
 
-//function to check if the ph value of NAOH is between 4.5 and 6.5
-bool monitor_ph_NAOH(float ph_NAOH)
-{
-    if (11.5 < ph_NAOH && ph_NAOH < 13)
-    {
-        char buffer[100];
-        snprintf(buffer, sizeof(buffer), "The pH value of NaOH is between 11.5 and 13 \r\n");
-        HAL_UART_Transmit(&huart2, (uint8_t *)buffer, strlen(buffer), 100);
-        return true;
-    }
-    return false;
-}
 
-//function to monitor the flow 
-bool monitor_flow(float flow_value) {
-    // Check if flow_value is greater than 0
-    if (flow_value > 0 && Idel) {
-			  uint8_t buffer[50]="The flow value is greater than 0 cc /10 seconds \r\n";
-        return true;
-    } else {
-        return false;
-    }
-}
 
 
 
@@ -1338,12 +1534,30 @@ bool monitor_low_pressure() {
         }
     } else {
         // Reset start time if pressure is not low
-        //HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
         start_time_h = 0;
         start_time_m = 0;
         return false;
     }
     return false;
+}
+
+void turn_outputs_off()
+{
+//   //drain solenoid
+     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_15, GPIO_PIN_RESET);
+//   //cell fill solenoid
+     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13, GPIO_PIN_RESET);
+//   //salt fill tube
+     HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_RESET);
+
+//   //cell power signal
+     HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_RESET);
+//   //salt pump off  
+     HAL_GPIO_WritePin(GPIOB, GPIO_PIN_4, GPIO_PIN_RESET);
+
+//   //NAOH flow controller
+
+//   //HOCL flow controler
 }
 
 
@@ -1352,8 +1566,11 @@ bool monitor_low_pressure() {
 void idle_state()
 {
 	//In idle state function.IT will run continously when the device starts
-	
+
    //Turn off all output signals off
+  turn_outputs_off();
+  Idle=true;
+
 	// Turn of cell power signal off
 	// monitor cell current.Equal to 0 Amps
  	static bool cell_power_status =false;
@@ -1390,23 +1607,25 @@ void idle_state()
 	static uint32_t Tankfill_timetrend_code=0;
 	static uint32_t Tankfill_timetrend_passcode=0;
 	uint32_t user_Tankfill_timetrend_passcode=0;
-
-
 	static bool prev_Tankfill_time=false,prev_Tankfill_timeexceed=false;
 	
 	uint32_t current_value=0;
-  Measurements cell = measure_current();
-	
+  Measurements cell = measure_current_voltage();
+
+
+
+
+
 	if (cell.cell_current==0)
 	{
-	
+	 
 	//system ready 
   if(Stop_signal && !Production && !MasterFault)
 	{
-	Idel_systemready_state=true;	
-	Idel_tanksfull_state=false;
-	Idel_tankfill_timeexceeded_state=false;
-	Idel_lowpressure_state=false;
+	Idle_systemready_state=true;	
+	Idle_tanksfull_state=false;
+	Idle_tankfill_timeexceeded_state=false;
+	Idle_lowpressure_state=false;
 		
 	Autocycle=false;
 	
@@ -1415,11 +1634,11 @@ void idle_state()
 	//Tank full state
 	if (HOCL_tank_level() && NAOH_tank_level())
 	{
-	Idel_tanksfull_state=true;
+	Idle_tanksfull_state=true;
 		
-	Idel_systemready_state=false;	
-	Idel_tankfill_timeexceeded_state=false;
-	Idel_lowpressure_state=false;
+	Idle_systemready_state=false;	
+	Idle_tankfill_timeexceeded_state=false;
+	Idle_lowpressure_state=false;
 		
 	Autocycle=true;
 	}
@@ -1428,18 +1647,17 @@ void idle_state()
 	
 	if (!monitor_pressure())
 	{
-	Idel_lowpressure_state=true;	
-	Idel_systemready_state=false;	
-	Idel_tankfill_timeexceeded_state=false;
-	Idel_lowpressure_state=false;		
-		
-		
+
+	Idle_lowpressure_state=true;	
+	Idle_systemready_state=false;	
+	Idle_tankfill_timeexceeded_state=false;
+	Idle_lowpressure_state=false;		
 	low_pressure_counter++;
 	low_pressure_system_hours=system_time;
 	low_pressure_cycle_hours=total_cycle_time;
 	//Turn off cell fill solenoid off for 30 seconds and on for 5 seconds
 
-if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
+if (!Iscellfillsolenoid && system_time.systemtime_s - cellfill_solenoid_time >= 30) {
     // Turn on the solenoid after it has been off for 30 seconds
     cellfill_solenoid(true);
     Iscellfillsolenoid = true;
@@ -1450,28 +1668,24 @@ if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
     Iscellfillsolenoid = false;
     cellfill_solenoid_time = system_time.ticks; // Update the last change time
 }
-	
-	
-
 	}	
-	
 	//Tank fill time exceed
 	if (Tankfill_time && Tankfill_timeexceed && !Resume_signal && !Tankfill_time_trend_correctpasscode )
  	{
-		Idel_tankfill_timeexceeded_state=true;
-		Idel_lowpressure_state=false;		
-		Idel_systemready_state=false;	
-		Idel_lowpressure_state=false;		
+		Idle_tankfill_timeexceeded_state=true;
+		Idle_lowpressure_state=false;		
+		Idle_systemready_state=false;	
+		Idle_lowpressure_state=false;		
 		
 		Tankfill_timeexceed=true;
 		Tankfill_timeexceed_counter++;
 		Tankfill_time_exceed_system_hours=system_time;
 		Tankfill_time_exceed_cycle_hours=total_cycle_time;
 		 
-      //read_system time from flash memory
-      //SystemTime read_sys_time=read_systemtime_in_flashmemory();
-	  	Tankfill_time_exceed_hours=system_time.systemtime_h;
-		  current_time_in_mins = system_time.systemtime_m;// system mins
+    //read_system time from flash memory
+    //SystemTime read_sys_time=read_systemtime_in_flashmemory();
+	  Tankfill_time_exceed_hours=system_time.systemtime_h;
+		current_time_in_mins = system_time.systemtime_m;// system mins
 		
     // Shift timestamps and add the new one
     for (int i = 3 - 1; i > 0; i--) {
@@ -1500,47 +1714,115 @@ if (!Iscellfillsolenoid && HAL_GetTick() - cellfill_solenoid_time >= 30000) {
 	}
 	
 }
+
 }
 
+char* monitor_faults()
+{
+    static char fault_name[200] = ""; // Static array to hold concatenated fault names
+    strcpy(fault_name, ""); // Initialize to empty string
+
+    bool cell_voltage_fault = monitor_cell_voltage();
+    bool controlboard_power_fault = controlboard_power();  
+    bool salt_tube_fault = fill_salt_tube();
+    bool brine_conductivity_fault = monitor_salttube_brine_conductivity(brine_conc_value);
+    bool low_pressure_fault = monitor_low_pressure();
+    bool flow_fault = monitor_flow(flow);
+    bool ph_HOCL_fault = monitor_pH_HOCL(ph_HOCL_value);
+    bool ph_NAOH_fault = monitor_pH_NAOH(ph_NAOH_value);
+  
+    if (cell_voltage_fault)
+    {
+        strcat(fault_name, "cell_voltage ");
+        fault_cellcontrol_status=true;
+    }
+     if (controlboard_power_fault)
+     {
+     strcat(fault_name, "control_board ");
+     fault_circuit_board_status=true;
+    }
+
+    if (salt_tube_fault)
+    {
+        strcat(fault_name, "salt_tube ");
+        fault_salt_tube_level_status=true;
+    }
+
+    if (brine_conductivity_fault)
+    {
+        strcat(fault_name, "brine_conductivity ");
+        fault_brine_conductivity_status=true;
+    }
+
+    if (low_pressure_fault)
+    {
+        strcat(fault_name, "low_pressure ");
+        fault_pressure_loss_status=true;
+    }
+
+    if (flow_fault)
+    {
+        strcat(fault_name, "flow_fault ");
+        fault_brine_conductivity_status=true;
+    }
+    if (ph_HOCL_fault)
+    {
+        strcat(fault_name, "ph_HOCL ");
+        fault_ph_hocl_status=true;
+    }
+    if (ph_NAOH_fault)
+    {
+        strcat(fault_name, "ph_NAOH ");
+        fault_ph_naoh_status=true;
+    }
+
+    return fault_name;
+}
 
 void production_state()
 {
    Production=false;
-	//variable for the salttube start time
+	 //variable for the salttube start time
 	 SystemTime current_time=time_conversion();
 	 static uint32_t salttube_start_time=0;
 	 static uint32_t priming_start_time=0;
+	 static uint32_t flushing_start_time=0;
 	 priming_start_time = current_time.systemtime_s;
    Priming_sequence=true;
 	 const uint32_t Priming_sequence_timer=4;
-
+   const uint32_t Flushing_sequence_timer=4;
 	
 	 uint32_t HOCL_current_production_duration_m=0;
 	 uint32_t HOCL_solution_production=0;
 	 uint32_t NAOH_current_production_duration_m=0;
 	 uint32_t NAOH_solution_production=0;
 	
-	 
-	 
-	 
+	 Measurements cell_reference;
+	 CellsMeasurement cells_reference;
+	 static uint32_t low_current_trend_counter=0;
+	 static uint32_t under_current_standby_counter=0;
+
+	 SystemTime low_current_trend_system_time;
+	 TotalCycleTime low_current_trend_cycle_time;
+
 	 //salttube_start_time=current_time.systemtime_s;
 	 //Priming_sequence=true;
-	
  	 // Priming conditions  for 4 seconds
-	 //In Priming state 
+
+    //In Priming state 
     if (Priming_sequence)
 		{
 	  if (current_time.systemtime_s - priming_start_time <= Priming_sequence_timer )
 		{
-
-		  CellsMeasurement cells_reference = measure_cells_current_voltages();
-			Measurements cell_reference = measure_current();
+			
+		   cells_reference = measure_cells_current_voltages();
+			 cell_reference = measure_current_voltage();
 			//turning on the salt pump 
 			HAL_GPIO_WritePin(GPIOA,GPIO_PIN_6,GPIO_PIN_SET);
 			//turning on the cell fill solenoid 
 		  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_13,GPIO_PIN_SET);
 			//turn on the Salt pump control signal ON
-						
+      
 			//turn on the salt tube for 2 seconds
       HAL_GPIO_WritePin(GPIOA, GPIO_PIN_13, GPIO_PIN_SET); // Start filling
 			salttube_start_time=current_time.systemtime_s;
@@ -1568,11 +1850,29 @@ void production_state()
   current_cycle_time.cycletime_s=system_time.systemtime_s - start_time.systemtime_s;
   
 	//writing cycle hours to flash memory
-  //write_total_cycle_time_in_flashmemory();
+	 
+  write_total_cycle_time_in_flashmemory();
 	 
 	//turn on the main cell signal ON
   HAL_GPIO_WritePin(GPIOC,GPIO_PIN_14,GPIO_PIN_SET);
+	
+	//check the current drops by 20%
+  if (compare_current_with_reference(cell_reference.cell_current))
+	{
+	 low_current_trend_counter++;
+	 low_current_trend_system_time=system_time;
+	 low_current_trend_cycle_time=current_cycle_time;
+	 lowcurrent_trend=true;
+	 //log current system hours and total cycle hours
+	}
 	 
+	//check if current is below threshold
+	current_below_threshold_for_duration();
+	
+	//check if current is higher than threshold
+	current_high_threshold_for_duration();
+		
+
 	if (!HOCL_tank_level())
 	{
 	HOCL_cycle_time.cycletime_h=system_time.systemtime_h - start_time.systemtime_h;
@@ -1596,15 +1896,36 @@ void production_state()
 	//monitor HOCL,NAOH and Saltpump flows
   //monitor PH of NAOH and HOCL		
 	}
+	
+	
+	
 	 
  }
-		
-		
-		
-		
-		
+ 
+ if (Stop_signal || NAOH_tank_level() || HOCL_tank_level() || monitor_pressure() || overcurrent || undercurrent || lowcurrent_trend )
+{
+	flushing_start_time=system_time.systemtime_s;
+	if(Flushing_sequence)
+	{
+   // In flushing condtion	 
+ 	//turn on the main cell signal ON
+	if(system_time.systemtime_s - flushing_start_time <= Flushing_sequence_timer)
+	{
+  HAL_GPIO_WritePin(GPIOC,GPIO_PIN_14,GPIO_PIN_RESET);
+	Production=false;
+	
+	//turning on the salt pump 
+	HAL_GPIO_WritePin(GPIOA,GPIO_PIN_6,GPIO_PIN_RESET);
+	//turning on the cell fill solenoid 
+  HAL_GPIO_WritePin(GPIOB,GPIO_PIN_13,GPIO_PIN_RESET);			
+ }
+		}
 }	
 		
+}
+
+
+
 
 
 /* USER CODE END 0 */
@@ -1649,26 +1970,33 @@ int main(void)
   /* USER CODE BEGIN 2 */
   HAL_ADC_Start(&hadc1);
 	I2C_Scan();
-  
 	
-	
+	//initialize I2C devices
+	measure_flow_NAOH_initialization();
+  measure_flow_HOCL_initialization();
+  measure_flow_HOCL_initialization();
+  pH_NAOH_initialization();
+  pH_HOCL_initialization();
+  salttube_brineconductivity_initialization();
+  HOCL_flow_controller_initialization();
+  NAOH_flow_controller_initialization();
 	start_time=time_conversion();
+
 	
+
+
+
   //erase_flash_memory(5, FLASH_VOLTAGE_RANGE_3);
   //write_systemtime_in_flashmemory();
 	
   //testing for fault
-  fault_circuit_board.counter = 1;
-  fault_circuit_board.cycle_hours = total_cycle_hours;
-	fault_circuit_board.fault_status=true;
-	fault_circuit_board.system_hours = system_hours;
-	fault_circuit_board.real_time_clock=4;
-	
-  update_fault(&my_faults,FAULT_TYPE_CKT_B , &fault_circuit_board_count, fault_circuit_board);
+ // fault_circuit_board.counter = 1;
+ // fault_circuit_board.cycle_hours = total_cycle_hours;
+///	fault_circuit_board.fault_status=true;
+	//fault_circuit_board.system_hours = system_hours;
+////	fault_circuit_board.real_time_clock=4;
+//update_fault(&my_faults,FAULT_TYPE_CKT_B , &fault_circuit_board_count, fault_circuit_board);
 
-  //calculate the cycle hours
-	
-		
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1680,34 +2008,26 @@ int main(void)
    currentTime=system_time.systemtime_s;
 	 system_time=time_conversion();	
 
-	//	NAOH_tank_level();
-		//HOCL_tank_level();
-		//salt_tube_bottom();
-	//	salt_tube_top();
-	//	fill_salt_tube();
-		//cell_current_greater_than_zero();
+		NAOH_tank_level();
+		HOCL_tank_level();
+		salt_tube_bottom();
+		salt_tube_top();
+		fill_salt_tube();
+		cell_current_greater_than_zero();
+		measure_current_voltage();
+    monitor_cell_voltage();
+		salt_pump();
+    drain_solenoid();
+    controlboard_power();
+    monitor_pH_HOCL(ph_HOCL_value);
+    monitor_pH_NAOH(ph_NAOH_value);
+		
+	     // char* faults = monitor_fault();
+    // printf("Detected Faults: %s\n", faults);
 
-		
-	 //update the system_time structure instance
-	 
-		
-	// if (Production)
-	// {
-		 
-//cycle_time.totalcycletime_h=system_time.systemtime_h - start_time.systemtime_h;
-	//  cycle_time.totalcycletime_m=system_time.systemtime_m - start_time.systemtime_m;
-  //  cycle_time.totalcycletime_s=system_time.systemtime_s - start_time.systemtime_s;
-
-	// }
-		
-	 
-		
-		
-		
 		
    //write the system hours in flashmemory after every 1 minute
-	 
-	if ((currentTime - lastSaveTime) >= 10) //write after 1 minute
+	if ((currentTime - lastSaveTime) >= 60) //write after 1 minute
     { 
 			  uint8_t buffer[150]=" !!!! writing time into flash memory \r\n";
 			  HAL_UART_Transmit(&huart2,buffer,sizeof(buffer),100);
@@ -1715,44 +2035,31 @@ int main(void)
         lastSaveTime = currentTime; // Update the last save time
 		}
 			
-   //sprintf(tickStr, "HAL_Tick: %d\n\r", HAL_GetTick());
-   // HAL_UART_Transmit(&huart2, (uint8_t *)tickStr, sizeof(tickStr), 280);
-		
-		
-		
-		
-		
-		/*
-		if (!Start_signal && !Production && !MasterFault)	
+		if (!Start_signal && !Production && !MasterFault && !Resume_signal)	
 		{
 			
-    	uint8_t buff[50]="---------In  condtion-------";
-			HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
-	 
-		//read_sys_cycle_hours_in_flashmemory();
-		measure_current();
-		//HAL_GetTick();
+    uint8_t buff[50]="---------In ideal condtion-------";
+		HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
+		measure_current_voltage();
 		salt_pump();
     drain_solenoid();
+    controlboard_power();
+    monitor_pH_HOCL(ph_HOCL_value);
+    monitor_pH_NAOH(ph_NAOH_value);
+
 		idle_state();
-	  Idel=true;
-		
-			
-		//function to check the faults all functions will return the bool value
-    monitor_cell_voltage();
-    monitor_flow(flow);
-    monitor_low_pressure();
-    monitor_ph_HOCL(ph_HOCL_value);
-    monitor_ph_NAOH(ph_NAOH_value);
-    monitor_salttube_brine_conductivity(brine_conc_value);	
-			
+	
 		}
 		
+
 		
 		
 		// move to production if their is start signal and all the idle state flags are not high
-		if (Start_signal && !Idel_systemready_state && !Idel_tanksfull_state && !Idel_tankfill_timeexceeded_state && !Idel_lowpressure_state && !MasterFault && !Production)
+		if (Start_signal && !Idle_systemready_state && !Idle_tanksfull_state && !Idle_tankfill_timeexceeded_state && !Idle_lowpressure_state && !MasterFault && !Production)
 		{
+      //turn production on when turned entire
+        //turn off when production off
+
 				  uint8_t buff[50]="---------In production condtion-------";
 			HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
 		}
@@ -1766,7 +2073,7 @@ int main(void)
 			HAL_UART_Transmit(&huart2,buff,sizeof(buff),100);
 		}
 		
-		 */
+		 
 
 
 	
